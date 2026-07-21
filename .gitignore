@@ -1,0 +1,24 @@
+.DS_Store
+.env
+.env.local
+
+backend/.venv/
+backend/__pycache__/
+backend/**/*.pyc
+backend/.env
+
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/.env.local
+frontend/.env
+
+.venv/
+__pycache__/
+output/
+
+# Local test exports (keep public sample assets)
+*.xlsx
+samples/*.pdf
+samples/*.png
+!frontend/public/

@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 280 64" role="img" aria-label="myTVS">
+  <text
+    x="0"
+    y="48"
+    font-family="Arial Black, Helvetica Neue, Helvetica, Arial, sans-serif"
+    font-size="52"
+    font-weight="800"
+    letter-spacing="-1.5"
+  >
+    <tspan fill="#F37021">my</tspan><tspan fill="#2E4192">TVS</tspan>
+  </text>
+</svg>
