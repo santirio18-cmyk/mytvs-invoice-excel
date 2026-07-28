@@ -391,10 +391,10 @@ export default function Home() {
                     <tr>
                       <th className="px-3 py-2.5 font-semibold">Part Number</th>
                       <th className="px-3 py-2.5 font-semibold">Description</th>
-                      <th className="px-3 py-2.5 font-semibold">HSN/SAC</th>
                       <th className="px-3 py-2.5 font-semibold">Qty</th>
                       <th className="px-3 py-2.5 font-semibold">Rate</th>
                       <th className="px-3 py-2.5 font-semibold">Amount</th>
+                      <th className="px-3 py-2.5 font-semibold">HSN/SAC</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -402,10 +402,10 @@ export default function Home() {
                       <tr key={idx} className={idx % 2 ? "bg-paper/80" : ""}>
                         <td className="px-3 py-2 text-ink">{it.part_number}</td>
                         <td className="px-3 py-2 text-ink">{it.description}</td>
-                        <td className="px-3 py-2 text-ink">{it.hsn_sac}</td>
                         <td className="px-3 py-2 text-ink">{it.qty}</td>
                         <td className="px-3 py-2 text-ink">{it.rate}</td>
                         <td className="px-3 py-2 text-ink">{it.amount}</td>
+                        <td className="px-3 py-2 text-ink">{it.hsn_sac}</td>
                       </tr>
                     ))}
                     {!inv.line_items?.length && (

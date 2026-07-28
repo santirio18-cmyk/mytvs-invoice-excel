@@ -845,7 +845,7 @@ def write_invoice_sheet(wb: Workbook, data: dict[str, Any], is_first: bool) -> N
         ws.cell(r, 1, label)
         ws.cell(r, 2, value)
 
-    headers = ["Part Number", "Description", "HSN/SAC", "Qty", "Rate", "Amount"]
+    headers = ["Part Number", "Description", "Qty", "Rate", "Amount", "HSN/SAC"]
     start_row = 7
     for col, h in enumerate(headers, 1):
         cell = ws.cell(start_row, col, h)
@@ -859,16 +859,16 @@ def write_invoice_sheet(wb: Workbook, data: dict[str, Any], is_first: bool) -> N
             row = start_row + 1 + i
             ws.cell(row, 1, str(item.get("part_number") or ""))
             ws.cell(row, 2, str(item.get("description") or ""))
-            ws.cell(row, 3, str(item.get("hsn_sac") or ""))
-            ws.cell(row, 4, str(item.get("qty") or ""))
-            ws.cell(row, 5, str(item.get("rate") or ""))
-            ws.cell(row, 6, str(item.get("amount") or ""))
+            ws.cell(row, 3, str(item.get("qty") or ""))
+            ws.cell(row, 4, str(item.get("rate") or ""))
+            ws.cell(row, 5, str(item.get("amount") or ""))
+            ws.cell(row, 6, str(item.get("hsn_sac") or ""))
 
     ws.column_dimensions["A"].width = 22
     ws.column_dimensions["B"].width = 40
-    ws.column_dimensions["C"].width = 14
+    ws.column_dimensions["C"].width = 12
     ws.column_dimensions["D"].width = 12
-    ws.column_dimensions["E"].width = 12
+    ws.column_dimensions["E"].width = 14
     ws.column_dimensions["F"].width = 14
 
 
@@ -893,10 +893,10 @@ def build_csv(invoices: list[dict[str, Any]]) -> bytes:
             "Place of Supply",
             "Part Number",
             "Description",
-            "HSN/SAC",
             "Qty",
             "Rate",
             "Amount",
+            "HSN/SAC",
             "Source File",
         ]
     )
@@ -920,10 +920,10 @@ def build_csv(invoices: list[dict[str, Any]]) -> bytes:
                     inv.get("place_of_supply", ""),
                     it.get("part_number", ""),
                     it.get("description", ""),
-                    it.get("hsn_sac", ""),
                     it.get("qty", ""),
                     it.get("rate", ""),
                     it.get("amount", ""),
+                    it.get("hsn_sac", ""),
                     inv.get("filename", ""),
                 ]
             )

@@ -22,7 +22,7 @@ const LEGEND = [
   {
     id: "4",
     label: "Line items",
-    detail: "Part No · HSN/SAC · Qty · Rate · Amount.",
+    detail: "Part No · Qty · Rate · Amount · HSN/SAC.",
     tone: "orange" as const,
   },
 ];
