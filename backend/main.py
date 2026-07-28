@@ -610,6 +610,11 @@ def parse_amount_trail_items(text: str) -> list[dict[str, str]]:
         m = row.search(ln)
         if not m:
             continue
+        qty_raw = m.group("qty")
+        unit = m.group("unit") or ""
+        # 4–8 digit "qty" with no unit is almost always an HSN code — skip (other parsers handle it)
+        if not unit and re.fullmatch(r"\d{4,8}", qty_raw):
+            continue
         head = _clean(m.group("head"))
         head = re.sub(r"^\d{1,3}[\)\.\s]+", "", head)
         part = ""
@@ -625,12 +630,143 @@ def parse_amount_trail_items(text: str) -> list[dict[str, str]]:
                 "part_number": part,
                 "description": desc,
                 "hsn_sac": "",
-                "qty": f"{m.group('qty')} {(m.group('unit') or '')}".strip(),
+                "qty": f"{qty_raw} {unit}".strip(),
                 "rate": m.group("rate"),
                 "amount": m.group("amount"),
             }
         )
     return _dedupe_items(items)
+
+
+def parse_credit_bill_hsn_rate_qty(text: str) -> list[dict[str, str]]:
+    """
+    CREDIT BILL / parts counter layout:
+    PartNo Description HSN Rate Qty [Amount]
+    e.g. F8P08758 RADIATOR HOSES 87089900 247.00 3.00
+    """
+    items: list[dict[str, str]] = []
+    row = re.compile(
+        r"(?P<part>[A-Z][A-Z0-9][A-Z0-9\-]{3,})\s+"
+        r"(?P<desc>[A-Za-z][A-Za-z0-9 \/\.\-]{2,}?)\s+"
+        r"(?P<hsn>\d{4,8})\s+"
+        r"(?P<rate>[\d,]+\.\d{2})\s+"
+        r"(?P<qty>\d+(?:[.,]\d+)?)\s*"
+        r"(?P<unit>NOS|Nos|PCS|SET|SETS|Nos-?)?\s*"
+        r"(?P<amount>[\d,]+\.\d{2})?",
+        re.I,
+    )
+    for raw in text.splitlines():
+        ln = _clean(raw)
+        if not ln or STOP_ITEM.search(ln):
+            continue
+        m = row.search(ln)
+        if not m:
+            continue
+        qty = m.group("qty")
+        unit = (m.group("unit") or "").rstrip("-")
+        rate = m.group("rate")
+        amount = m.group("amount") or ""
+        if not amount:
+            try:
+                amount = f"{float(qty.replace(',', '')) * float(rate.replace(',', '')):,.2f}"
+            except Exception:
+                amount = ""
+        # Sanity: qty should be a real quantity, not another HSN
+        if re.fullmatch(r"\d{4,8}", qty) and not unit:
+            continue
+        items.append(
+            {
+                "part_number": m.group("part"),
+                "description": _clean(m.group("desc")),
+                "hsn_sac": m.group("hsn"),
+                "qty": f"{qty} {unit}".strip(),
+                "rate": rate,
+                "amount": amount,
+            }
+        )
+    return _dedupe_items(items)
+
+
+def parse_part_hsn_qty_rate(text: str) -> list[dict[str, str]]:
+    """
+    PartNo Description HSN Qty [Unit] Rate [Tax%] Amount
+    (no serial number prefix — common on credit bills)
+    """
+    items: list[dict[str, str]] = []
+    row = re.compile(
+        r"(?P<part>[A-Z][A-Z0-9][A-Z0-9\-]{3,})\s+"
+        r"(?P<desc>[A-Za-z][A-Za-z0-9 \/\.\-]{2,}?)\s+"
+        r"(?P<hsn>\d{4,8})\s+"
+        r"(?P<qty>\d+(?:[.,]\d+)?)\s*"
+        r"(?P<unit>NOS-?|Nos|PCS|SET|SETS|ROLL)?\s+"
+        r"(?P<rate>[\d,]+\.\d{2})\s+"
+        r"(?:(?P<tax>\d{1,2})\s+)?"
+        r"(?P<amount>[\d,]+\.\d{2})",
+        re.I,
+    )
+    for raw in text.splitlines():
+        ln = _clean(raw)
+        if not ln or STOP_ITEM.search(ln):
+            continue
+        m = row.search(ln)
+        if not m:
+            continue
+        unit = (m.group("unit") or "").rstrip("-")
+        items.append(
+            {
+                "part_number": m.group("part"),
+                "description": _clean(m.group("desc")),
+                "hsn_sac": m.group("hsn"),
+                "qty": f"{m.group('qty')} {unit}".strip(),
+                "rate": m.group("rate"),
+                "amount": m.group("amount"),
+            }
+        )
+    return _dedupe_items(items)
+
+
+def _normalize_shifted_hsn(items: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Fix rows where HSN landed in qty and real qty landed in amount."""
+    fixed: list[dict[str, str]] = []
+    for it in items:
+        qty = str(it.get("qty") or "").strip()
+        rate = str(it.get("rate") or "").strip()
+        amount = str(it.get("amount") or "").strip()
+        hsn = str(it.get("hsn_sac") or "").strip()
+        qty_num = re.sub(r"[^\d]", "", qty.split()[0]) if qty else ""
+        amt_num = amount.replace(",", "")
+        # Classic shift: qty is 4–8 digit HSN, amount is small quantity
+        if (
+            not hsn
+            and re.fullmatch(r"\d{4,8}", qty_num)
+            and re.fullmatch(r"\d+(?:\.\d{1,2})?", amt_num or "")
+        ):
+            try:
+                q = float(amt_num)
+                r = float(rate.replace(",", ""))
+            except Exception:
+                fixed.append(it)
+                continue
+            if q <= 5000 and r > 0:
+                new_amount = f"{q * r:,.2f}"
+                it = {
+                    **it,
+                    "hsn_sac": qty_num,
+                    "qty": str(int(q)) if q == int(q) else str(q),
+                    "rate": rate,
+                    "amount": new_amount,
+                }
+        # HSN glued onto description end
+        desc = str(it.get("description") or "")
+        glued = re.search(r"^(.*?)(\d{8})$", desc)
+        if glued and not it.get("hsn_sac"):
+            it = {
+                **it,
+                "description": glued.group(1).strip(" -"),
+                "hsn_sac": glued.group(2),
+            }
+        fixed.append(it)
+    return fixed
 
 
 def parse_einvoice_line_items(text: str) -> list[dict[str, str]]:
@@ -720,6 +856,8 @@ def parse_line_items(text: str) -> list[dict[str, str]]:
     """
     candidates = [
         parse_einvoice_line_items(text),
+        parse_part_hsn_qty_rate(text),
+        parse_credit_bill_hsn_rate_qty(text),
         parse_tally_scan_items(text, hsn_digits=8),
         parse_tally_scan_items(text, hsn_digits=4),
         parse_part_column_items(text),
@@ -727,7 +865,7 @@ def parse_line_items(text: str) -> list[dict[str, str]]:
     ]
     best = max(candidates, key=_item_score)
     if _item_score(best) > 0:
-        return best
+        return _normalize_shifted_hsn(best)
     return []
 
 
