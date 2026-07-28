@@ -34,7 +34,9 @@ PDF_EXTS = {".pdf"}
 _cors = os.getenv("CORS_ORIGINS", "*").strip()
 CORS_ORIGINS = [o.strip() for o in _cors.split(",") if o.strip()] or ["*"]
 
-app = FastAPI(title="myTVS — Invoice to Excel", version="1.3.0")
+app = FastAPI(title="myTVS — Invoice to Excel", version="1.4.0")
+
+DEPLOY_MARK = "2026-07-28-vinayaka11"
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -1428,7 +1430,7 @@ def save_outputs(invoices: list[dict[str, Any]], stamp: str) -> Path:
 
 @app.get("/api/health")
 def health() -> dict[str, str]:
-    return {"status": "ok"}
+    return {"status": "ok", "version": app.version, "build": DEPLOY_MARK}
 
 
 async def _load_invoices(files: list[UploadFile]) -> tuple[list[dict[str, Any]], list[str]]:
