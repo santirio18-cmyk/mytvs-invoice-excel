@@ -1,8 +1,11 @@
+# Put this file at the SERVICE level in Railway, OR set Root Directory = backend.
+# Prefer: Railway → service Settings → Root Directory → backend
+
 [build]
 builder = "DOCKERFILE"
 dockerfilePath = "Dockerfile"
 
 [deploy]
 healthcheckPath = "/api/health"
-healthcheckTimeout = 30
+healthcheckTimeout = 100
 restartPolicyType = "ON_FAILURE"

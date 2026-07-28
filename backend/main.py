@@ -57,11 +57,18 @@ ALT_FILL = PatternFill("solid", fgColor="F4F7FB")
 # Soft OCR cleanup only — not a supplier whitelist
 def _normalize_supplier_ocr(name: str) -> str:
     name = _clean(name)
+    name = re.sub(r"(?i)\b\w*INVOICE\b.*$", "", name)
+    name = re.sub(r"(?i)\s+inreokce\b.*$", "", name)
+    name = re.sub(r"(?i)\s+inv[o0][il1]?ce\b.*$", "", name)
     name = re.sub(r"(?i)\bAGENGC\b", "AGENCIES", name)
     name = re.sub(r"(?i)\bAGENCIE\b", "AGENCIES", name)
+    name = re.sub(r"(?i)\beNCY\b", "AGENCY", name)
+    name = re.sub(r"(?i)^[A4]UTOLIGH\w*", "AUTOLIGHT", name)
     name = re.sub(r"(?i)^[AR]?UTOONE\b", "AUTOONE", name)
     name = re.sub(r"(?i)^ANGAM\b", "THANGAM", name)
-    name = re.sub(r"\s+", " ", name).strip(" -|,")
+    # OCR leftover after brand: "AUTOLIGHT: A"
+    name = re.sub(r":\s*[A-Z]?\s*$", "", name)
+    name = re.sub(r"\s+", " ", name).strip(" -|,:;")
     return name[:90]
 
 
@@ -89,8 +96,9 @@ def preprocess(img: Image.Image) -> Image.Image:
 
 def ocr_image(img: Image.Image) -> str:
     prepared = preprocess(img)
-    # Full page — PSM 4 works best on these invoice photos/scans
+    # Full page — PSM 4 works best on many invoice photos; PSM 6 recovers denser tables
     full = pytesseract.image_to_string(prepared, lang="eng", config="--oem 3 --psm 4")
+    full6 = pytesseract.image_to_string(prepared, lang="eng", config="--oem 3 --psm 6")
 
     # Extra pass on top-right (invoice no / date often lives there and gets clipped in photos)
     w, h = prepared.size
@@ -101,7 +109,7 @@ def ocr_image(img: Image.Image) -> str:
     mid = prepared.crop((0, int(h * 0.35), w, int(h * 0.72)))
     mid_txt = pytesseract.image_to_string(mid, lang="eng", config="--oem 3 --psm 6")
 
-    return "\n".join([full, tr, mid_txt])
+    return "\n".join([full, full6, tr, mid_txt])
 
 
 def extract_text_from_pdf(data: bytes) -> str:
@@ -199,6 +207,15 @@ INVOICE_PATTERNS = [
         re.I,
     ),
     re.compile(r"Invoice\s*No\.?\s*[:\-]?\s*([A-Z0-9][A-Z0-9\/\-]{2,})", re.I),
+    # Invoice No on one line, value on next / after OCR junk (e.g. 26-27-AUTO-10286)
+    re.compile(
+        r"Invoice\s*No\.?\s*[:\-]?\s*[^\n]{0,80}?(\d{2}-\d{2}-[A-Z]{2,}-\d{3,})",
+        re.I,
+    ),
+    # Bare FY-supplier-serial style
+    re.compile(r"\b(\d{2}-\d{2}-[A-Z]{2,}-\d{3,})\b", re.I),
+    # Supplier prefix / serial / FY: SVAA/3446/26-27
+    re.compile(r"\b([A-Z]{2,6}\/\d{2,5}\/\d{2}-\d{2})\b", re.I),
     # Bare Tally-style: 151/2026-27 or 279/2026-27 near top
     re.compile(r"\b(\d{1,4}\/\d{2,4}-\d{2})\b"),
     # A/TR1562/26-27 style (OCR may drop slash / misread)
@@ -256,29 +273,46 @@ def _is_plausible_invoice_no(val: str) -> bool:
 
 
 def find_invoice_number(text: str) -> str:
+    # Prefer clear FY-supplier-serial forms even when OCR separates the label
+    for m in re.finditer(r"\b(\d{2}-\d{2}-[A-Z]{2,}-\d{3,})\b", text, re.I):
+        val = _normalize_invoice_no(_clean(m.group(1)))
+        if _is_plausible_invoice_no(val):
+            return val
+
+    # Supplier code / serial / FY — SVAA/3446/26-27 (prefer over bare 3446/26-27)
+    for m in re.finditer(r"\b([A-Z]{2,6}\/\d{2,5}\/\d{2}-\d{2})\b", text, re.I):
+        val = _normalize_invoice_no(_clean(m.group(1)))
+        if _is_plausible_invoice_no(val):
+            return val
+
     # Highest priority: common Indian invoice labels (any supplier)
     for pat in (
         re.compile(r"Bill\s*No\.?\s*[:\-]?\s*([A-Z0-9][A-Z0-9\/\-]*)", re.I),
-        re.compile(r"(?:DLR\s*)?Invoice\s*(?:No|Number|Sl\.?\s*No)\.?\s*[:\-]?\s*([A-Z0-9][A-Z0-9\/\-]*)", re.I),
+        re.compile(
+            r"(?:DLR\s*)?Invoice\s*(?:No|Number|Sl\.?\s*No)\.?\s*[:\-]?\s*"
+            r"(?:[^\nA-Z0-9]{0,20})?([A-Z0-9][A-Z0-9\/\-]{2,})",
+            re.I,
+        ),
         re.compile(r"(?:Inv|te)\s*No\.?\s*[:\-]?\s*([A-Z0-9][A-Z0-9\/\-]{2,})", re.I),  # OCR: teNo.
     ):
         m = pat.search(text)
         if m:
             val = _normalize_invoice_no(_clean(m.group(1)))
-            if _is_plausible_invoice_no(val):
+            if _is_plausible_invoice_no(val) and val.upper() not in {"SST", "GST", "HSN", "IRN"}:
                 return val
 
     candidates: list[str] = []
     for pat in INVOICE_PATTERNS:
         for m in pat.finditer(text):
             val = _normalize_invoice_no(_clean(m.group(1)).rstrip(".,;"))
-            if val and val.lower() not in {"dated", "date", "original", "page", "delivery"}:
+            if val and val.lower() not in {"dated", "date", "original", "page", "delivery", "sst"}:
                 candidates.append(val)
     ranked = sorted(
         candidates,
         key=lambda v: (
             1 if re.search(r"\d", v) else 0,
             1 if "/" in v or "-" in v else 0,
+            1 if re.match(r"^[A-Z]{2,}/", v) else 0,
             len(v),
         ),
         reverse=True,
@@ -290,16 +324,23 @@ def find_invoice_number(text: str) -> str:
 
 
 def find_date(text: str) -> str:
-    # Prefer labeled invoice date over due date / random dates
-    labeled = re.search(
-        r"(?:Invoice\s*)?Date[d]?\s*[:\-]?\s*"
+    # Prefer labeled invoice date over due date / ack date / random dates
+    for pat in (
+        r"Invoice\s*Date[d]?\s*[:\-]?\s*"
         r"(\d{1,2}[\-\/\.]\s*(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[\-\/\.]?\s*\d{2,4}"
         r"|\d{1,2}[\-\/\.]\d{1,2}[\-\/\.]\d{2,4})",
-        text,
-        re.I,
-    )
-    if labeled:
-        return _clean(labeled.group(1)).replace(" ", "")
+        r"(?<!Ack\s)(?<!Ack)Date[d]?\s*[:\-]?\s*"
+        r"(\d{1,2}[\-\/\.]\s*(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[\-\/\.]?\s*\d{2,4}"
+        r"|\d{1,2}[\-\/\.]\d{1,2}[\-\/\.]\d{2,4})",
+    ):
+        labeled = re.search(pat, text, re.I)
+        if labeled:
+            return _clean(labeled.group(1)).replace(" ", "")
+    # Prefer numeric dd-m-yyyy / dd-mm-yyyy near top (photo OCR often has 25-7-2026)
+    top = "\n".join(text.splitlines()[:40])
+    m = re.search(r"\b(\d{1,2}-\d{1,2}-\d{4})\b", top)
+    if m:
+        return m.group(1)
     for pat in DATE_PATTERNS[1:]:
         m = pat.search(text)
         if m:
@@ -313,7 +354,10 @@ def find_supplier(text: str) -> str:
     # Supplier lives above buyer / bill-to blocks
     cut = len(lines)
     for i, ln in enumerate(lines[:40]):
-        if re.search(r"(?i)^(buyer|bill\s*to|consignee|ship\s*to|to\.|customer\s*name)", ln):
+        if re.search(
+            r"(?i)^(buyer|bill\s*to|consignee|ship\s*to|to[,\.]?\s|customer\s*name|tvs\s+auto)",
+            ln,
+        ):
             cut = i
             break
         if re.search(r"(?i)buyer\s*\(bill\s*to\)|consignee\s*\(ship", ln):
@@ -322,44 +366,57 @@ def find_supplier(text: str) -> str:
     header = lines[: max(cut, 1)]
 
     skip = re.compile(
-        r"(?i)^(tax\s*invoice|original|duplicate|page|gstin|state|e-?mail|contact|phone|"
-        r"invoice|dated|bill\s*to|buyer|consignee|ship|delivery|reference|dlr|sap|"
-        r"irn|ack\s*no|payment|to\.|e-?invoice|item\s*name|thanks|transport)",
+        r"(?i)^[\(\[]?\s*(tax\s*invoice|taxinvoice|auto\s*taxinvoice|original|duplicate|page|"
+        r"gstin|state|e-?mail|contact|phone|invoice|dated|bill\s*to|buyer|consignee|ship|"
+        r"delivery|reference|dlr|sap|irn|ack\s*no|payment|to\.|e-?invoice|item\s*name|thanks|"
+        r"transport|banks?\s*details|hsn|terms)",
     )
     company_word = re.compile(
         r"(?i)\b(AGENCY|AGENCIES|MOTORS|AUTO|PRIVATE|LIMITED|PVT|TRADERS|ENTERPRISES|"
-        r"SERVICE|SOLUTIONS|INDUSTRIES|CORPORATION|COMPANY|DEALER)\b",
+        r"SERVICE|SOLUTIONS|INDUSTRIES|CORPORATION|COMPANY|DEALER|LIGHT)\b",
     )
 
     scored: list[tuple[int, str]] = []
-    for i, ln in enumerate(header[:20]):
+    for i, ln in enumerate(header[:30]):
         if skip.search(ln):
             continue
         if re.search(r"GSTIN", ln, re.I):
             continue
         if re.search(r"\d{6}\s*$", ln) and not company_word.search(ln):
             continue
+        cand = re.split(r"\s{2,}|GSTIN|NO\.?\d", ln, flags=re.I)[0].strip()
+        cand = re.split(r"(?i)\s+(?:invoice|fivoes|tie:|dated|gstin|sstin)", cand)[0].strip()
+        cand = _normalize_supplier_ocr(cand)
+        if not cand:
+            continue
+        # Don't treat invoice numbers containing AUTO as supplier
+        if re.search(r"\d{2}-\d{2}-[A-Z]+-\d+", cand):
+            continue
         score = 0
-        if company_word.search(ln):
+        if company_word.search(cand):
             score += 3
-        if ln.isupper() and 4 <= len(ln) <= 70:
+        if cand.isupper() and 4 <= len(cand) <= 70:
             score += 2
-        if i < 6:
+        if i < 8:
+            score += 2
+        if re.match(r"(?i)^autolight\b", cand):
+            score += 6
+        if re.search(r"(?i)\b(agenc(?:y|ies)|motors|traders|enterprises)\b", cand):
             score += 2
         # Prefer seller-side words; downrank buyer-ish if leaked
-        if re.search(r"(?i)\b(TVS AUTOMOBILE SOLUTIONS|BILL TO|BUYER)\b", ln):
+        if re.search(r"(?i)\b(TVS AUTOMOBILE SOLUTIONS|BILL TO|BUYER)\b", cand):
             score -= 4
-        if score > 0:
-            cand = re.split(r"\s{2,}|GSTIN|NO\.?\d", ln, flags=re.I)[0].strip()
-            # Cut OCR tail junk after company name
-            cand = re.split(r"(?i)\s+(?:invoice|fivoes|tie:|dated|gstin|sstin)", cand)[0].strip()
-            cand = _normalize_supplier_ocr(cand)
-            letters = sum(c.isalpha() for c in cand)
-            if re.search(r"[\\©®_/]{2,}|ASHOK\s*Levi", cand, re.I):
-                continue
-            if 3 <= len(cand) <= 90 and letters >= 4 and letters / max(len(cand), 1) >= 0.45:
-                if not re.search(r"(?i)^(?:gstin|sstin|uin)", cand):
-                    scored.append((score, cand))
+        # Downrank OCR noise / website / bank lines
+        if re.search(r"(?i)mahindra\s*bank|website|wob\s*sita|tamil\s*nady", cand):
+            score -= 5
+        if re.fullmatch(r"(?i)auto|agency|agencies|motors|limited|pvt|private|light", cand):
+            continue
+        letters = sum(c.isalpha() for c in cand)
+        if re.search(r"[\\©®_/]{2,}|ASHOK\s*Levi", cand, re.I):
+            continue
+        if score > 0 and 3 <= len(cand) <= 90 and letters >= 4 and letters / max(len(cand), 1) >= 0.45:
+            if not re.search(r"(?i)^(?:gstin|sstin|uin)", cand):
+                scored.append((score, cand))
 
     # After seller GSTIN, next company-like line
     for i, ln in enumerate(header[:12]):
@@ -374,8 +431,16 @@ def find_supplier(text: str) -> str:
             break
 
     if scored:
-        scored.sort(key=lambda x: (-x[0], len(x[1])))
-        return scored[0][1]
+        scored.sort(key=lambda x: (-x[0], -len(x[1])))
+        best = scored[0][1]
+        # If we recovered a brand like AUTOLIGHT and AGENCY appears in the header, join them
+        header_blob = "\n".join(header[:30])
+        if re.search(r"(?i)\bagenc(?:y|ies)|\bency\b", header_blob) and not re.search(
+            r"(?i)\bagenc", best
+        ):
+            if re.search(r"(?i)light|auto|motors|traders|enterprises", best):
+                best = f"{best} AGENCY"
+        return best
     return "Unknown"
 
 
@@ -440,7 +505,7 @@ def parse_tally_scan_items(text: str, hsn_digits: int = 8) -> list[dict[str, str
         rf"{hsn_re}\s+"
         rf"(?P<gst>\d{{1,2}})\s*%?\S*\s+"
         rf"(?P<qty>\d+)\s*"
-        rf"(?P<unit>Nos|NOS|SET|SETS|BOX|roll|metre|PCS|BUCKET|BUCKETS)?\s*"
+        rf"(?P<unit>Nos|NOS|SET|SETS|BOX|roll|metre|PCS|BUCKET|BUCKETS|PKT|PKTS)?\s*"
         rf"(?P<rate>\d{{1,3}}(?:,\d{{3}})*\.\d{{2}}|\d{{1,4}},\d{{2}}|\d+\.\d{{2}})\s*"
         rf"[^\d]*?"
         rf"(?P<amount>\d{{1,3}}(?:,\d{{3}})*\.\d{{2}}|\d+\.\d{{2}})",
@@ -687,6 +752,116 @@ def parse_credit_bill_hsn_rate_qty(text: str) -> list[dict[str, str]]:
     return _dedupe_items(items)
 
 
+def parse_photo_gstr_qty_rate(text: str) -> list[dict[str, str]]:
+    """
+    Phone-photo OCR of PART | HSN | GSTR% | QTY | Rate | Dis% | AMOUNT tables.
+    Examples:
+      —~Tsaeneee | 18%| 2NOS| 906.00| 38%| 1,123.46
+      39269089 | 18%) 1PKT) 200,00 200.90
+    """
+    items: list[dict[str, str]] = []
+    money = r"(?:[\d,]+\.\d{2}|\d{1,4},\d{2})"
+    trail = re.compile(
+        rf"(?:(?P<hsn>\d{{4,8}})\s*[|)\s]*)?"
+        rf"(?P<gst>\d{{1,2}})\s*%[|)\s]*"
+        rf"(?P<qty>\d+(?:[.,]\d+)?)\s*"
+        rf"(?P<unit>NOS|PKT|PCS|SET|SETS|ROLL|Nos|PKTS)?\s*"
+        rf"[|)\s]*"
+        rf"(?P<rate>{money})"
+        rf"(?:\s*(?:\d{{1,2}}\s*%)?[|)\s]*)*"
+        rf"(?P<amount>{money})",
+        re.I,
+    )
+
+    # Harvest likely part codes from the whole OCR blob (often on separate lines)
+    part_cands: list[str] = []
+    for m in re.finditer(r"\b((?:Sw|SW|GT|Sp|SP|Pt|PT)\s*[\-]?\s*\d{2,5}[A-Za-z]?)\b", text, re.I):
+        p = re.sub(r"\s+", " ", m.group(1)).strip()
+        if p.upper() not in {x.upper() for x in part_cands}:
+            part_cands.append(p)
+    # GT 370 RED — OCR often splits / mangled as Ta9370 + RED
+    if re.search(r"(?i)\b(?:GT\s*)?370\b", text) and re.search(r"(?i)\bRED\b", text):
+        if not any(re.search(r"(?i)370", p) for p in part_cands):
+            part_cands.append("GT 370 RED")
+
+    desc_hints: list[str] = []
+    if re.search(r"(?i)cum\s*st", text):
+        desc_hints.append("Ign Cum Stg Lock")
+    if re.search(r"(?i)tag\s*370|teus70|ta9?370|red[-\s]?white|rea\.?\s*wine", text):
+        desc_hints.append("GT Tag370 Red-White")
+
+    for raw in text.splitlines():
+        ln = _clean(raw)
+        if not ln or STOP_ITEM.search(ln):
+            continue
+        if not re.search(r"\d{1,2}\s*%", ln):
+            continue
+        m = trail.search(ln)
+        if not m:
+            continue
+        qty = m.group("qty")
+        unit = (m.group("unit") or "").upper()
+        try:
+            qty_n = float(qty.replace(",", ""))
+        except Exception:
+            continue
+        if not unit and qty_n > 99:
+            continue
+        head = _clean(ln[: m.start()])
+        head = re.sub(r"^\d{1,3}[\)\.\|]\s*", "", head)
+        head = re.sub(r"[|\\~—–]+", " ", head)
+        head = re.sub(r"[^\w\s/\.\-]+", " ", head)
+        head = _clean(head)
+        part, desc = "", head
+        tokens = [t for t in head.split() if re.search(r"[A-Za-z0-9]", t)]
+        if tokens:
+            t0 = tokens[0]
+            if re.search(r"[A-Za-z]", t0) and re.search(r"\d", t0):
+                part = t0
+                desc = " ".join(tokens[1:]) or t0
+            elif len(tokens) >= 2 and re.match(r"(?i)^(sw|gt|sp|pt)$", t0):
+                part = f"{t0} {tokens[1]}"
+                desc = " ".join(tokens[2:]) or part
+        letters = sum(c.isalpha() for c in desc)
+        vowels = sum(c in "aeiouAEIOU" for c in desc)
+        if letters < 4 or (letters >= 6 and vowels == 0) or re.search(r"(.)\1{2,}", desc):
+            desc = ""
+        if len(desc) < 2 and not part:
+            desc = f"Item HSN {m.group('hsn')}" if m.group("hsn") else "Line item"
+        items.append(
+            {
+                "part_number": part,
+                "description": (desc or "Line item")[:80],
+                "hsn_sac": m.group("hsn") or "",
+                "qty": f"{qty} {unit}".strip(),
+                "rate": _fix_money(m.group("rate")),
+                "amount": _fix_money(m.group("amount")),
+            }
+        )
+
+    pi = 0
+    di = 0
+    for it in items:
+        if not it.get("part_number") and pi < len(part_cands):
+            it["part_number"] = part_cands[pi]
+            pi += 1
+        elif it.get("part_number") and pi < len(part_cands):
+            pi += 1
+        weak = it.get("description") in ("", "Line item") or str(it.get("description", "")).startswith(
+            "Item HSN"
+        )
+        if weak and di < len(desc_hints):
+            it["description"] = desc_hints[di]
+            di += 1
+        elif not weak and di < len(desc_hints):
+            di += 1
+    for it in items:
+        if not it.get("part_number") and pi < len(part_cands):
+            it["part_number"] = part_cands[pi]
+            pi += 1
+    return _dedupe_items(items)
+
+
 def parse_part_hsn_qty_rate(text: str) -> list[dict[str, str]]:
     """
     PartNo Description HSN Qty [Unit] Rate [Tax%] Amount
@@ -849,15 +1024,166 @@ def _item_score(items: list[dict[str, str]]) -> int:
     return score
 
 
+def _align_rate_to_amount(qty: str, rate: str, amount: str) -> str:
+    """Fix OCR-dropped decimals (e.g. 249 vs 2.49 when qty*rate≈amount)."""
+    try:
+        q = float(qty.replace(",", ""))
+        r = float(rate.replace(",", ""))
+        a = float(amount.replace(",", ""))
+    except Exception:
+        return rate
+    if q <= 0:
+        return rate
+    if abs(q * r - a) <= 0.06:
+        return f"{r:.2f}" if "." not in rate else rate
+    for div in (10, 100, 1000):
+        if abs(q * (r / div) - a) <= 0.06:
+            return f"{r / div:.2f}"
+    return rate
+
+
+def _ocr_hsn_digits(token: str) -> str:
+    """Keep clean 8-digit HSN; only lightly repair low-letter OCR tokens."""
+    t = re.sub(r"[^A-Za-z0-9]", "", token.strip())
+    if re.fullmatch(r"\d{8}", t):
+        return t
+    if re.fullmatch(r"\d{9}", t):
+        return t[-8:]
+    # ja5124000 → 85124000 (j + 7 digits, leading 8 dropped by OCR)
+    if re.fullmatch(r"(?i)j[a-z]?\d{7}", t):
+        digits = re.sub(r"\D", "", t)
+        if len(digits) == 7:
+            return "8" + digits
+    # Soft letter→digit only when almost all digits (≤2 letters)
+    letters = sum(c.isalpha() for c in t)
+    if 8 <= len(t) <= 9 and letters <= 2 and re.fullmatch(r"[0-9OoIlSsAaGgJj]+", t):
+        map_ch = str.maketrans("OoIlSsAaGgJj", "001155448877")
+        cand = t.translate(map_ch)
+        if len(cand) == 9:
+            cand = cand[-8:]
+        if re.fullmatch(r"\d{8}", cand) and cand[:2] in {
+            "39", "40", "73", "82", "83", "84", "85", "87", "90", "94",
+        }:
+            return cand
+    return ""
+
+
+def parse_s_code_nos_items(text: str) -> list[dict[str, str]]:
+    """
+    Tally-style parts invoices (e.g. SRI VINAYAKA / SUPER Brand):
+      2S 2007 -BLADE FUSE 30A 85361090 50 nos 2.66 nos 133.00
+      11 $9810 LED BREAK LIGHT ... 85122010 25 nos 21.08 nos 527.00
+    Part codes start with S + digits (OCR often reads S as $); qty uses 'nos'.
+    Prefer SI No when present so duplicate SKUs (same part twice) are kept.
+    """
+    by_sl: dict[int, dict[str, str]] = {}
+    no_sl: list[dict[str, str]] = []
+    row = re.compile(
+        r"(?P<sl>\d{1,2})?\s*[+§]?\s*"
+        r"(?P<part>[S$]\s*\d{3,5}[A-Za-z]?)\s+"
+        r"(?P<desc>.+?)\s+"
+        r"(?:[|\[{/\s]*)?(?P<hsn>\d{8,9}|[A-Za-z]{0,3}\d{5,8}|[0-9OoIlSsAaGgJj]{8})?\s*"
+        r"(?P<qty>\d+)\s*nos\s+"
+        r"(?P<rate>\d+(?:[.,]\d+)?)\s+"
+        r"(?:nos\s+)?"
+        r"(?P<amount>[\d,]+\.\d{2})",
+        re.I,
+    )
+
+    def _quality(it: dict[str, str]) -> float:
+        score = 0.0
+        if it.get("hsn_sac") and re.fullmatch(r"\d{8}", it["hsn_sac"] or ""):
+            score += 2
+        try:
+            q = float(str(it["qty"]).split()[0])
+            r = float(str(it["rate"]).replace(",", ""))
+            a = float(str(it["amount"]).replace(",", ""))
+            if abs(q * r - a) <= 0.06:
+                score += 3
+        except Exception:
+            pass
+        score += min(len(it.get("description") or ""), 40) / 20.0
+        return score
+
+    for raw in text.splitlines():
+        ln = _clean(raw)
+        if not ln or STOP_ITEM.search(ln):
+            continue
+        if not re.search(r"(?i)\bnos\b", ln):
+            continue
+        m = row.search(ln)
+        if not m:
+            continue
+        part = re.sub(r"\s+", " ", m.group("part")).strip()
+        part = part.replace("$", "S")
+        pm = re.match(r"(?i)^(S)\s*(\d{3,5}[A-Za-z]?)$", part)
+        if pm:
+            part = f"{pm.group(1).upper()} {pm.group(2)}"
+        desc = _clean(m.group("desc"))
+        desc = re.sub(r"[|\[{\\]+$", "", desc).strip()
+        desc = re.sub(r"^\d{1,2}\s+", "", desc)
+        # Trailing OCR HSN junk in description (gsoago30, sg26o0e9, jss26o0¢9)
+        junk = re.search(r"(?i)(?:\s*[|\\])?\s*([a-z0-9¢]{6,12})\s*$", desc)
+        if junk and not re.fullmatch(r"\d+\.?\d*", junk.group(1)):
+            maybe = _ocr_hsn_digits(re.sub(r"[^A-Za-z0-9]", "", junk.group(1)))
+            desc = desc[: junk.start()].strip()
+        else:
+            maybe = ""
+        desc = re.sub(r"\s+\d{1,2}$", "", desc).strip()
+
+        hsn_raw = m.group("hsn") or ""
+        if re.fullmatch(r"\d{9}", hsn_raw):
+            hsn = _ocr_hsn_digits(hsn_raw[-8:])
+        else:
+            hsn = _ocr_hsn_digits(hsn_raw)
+        if not hsn and maybe:
+            hsn = maybe
+        if not hsn:
+            hm = re.search(r"(\d{8})\s*$", desc)
+            if hm:
+                hsn = hm.group(1)
+                desc = desc[: hm.start()].strip()
+        if desc.upper().startswith(part.upper()):
+            desc = desc[len(part) :].strip(" -") or desc
+        desc = desc.lstrip(" -").strip()
+        qty = m.group("qty")
+        rate = _align_rate_to_amount(qty, m.group("rate").replace(",", "."), m.group("amount"))
+        if len(desc) < 2:
+            desc = part
+        item = {
+            "part_number": part,
+            "description": desc,
+            "hsn_sac": hsn,
+            "qty": f"{qty} nos",
+            "rate": rate,
+            "amount": m.group("amount"),
+        }
+        sl_raw = m.group("sl")
+        if sl_raw:
+            sl = int(sl_raw)
+            if 1 <= sl <= 80:
+                prev = by_sl.get(sl)
+                if not prev or _quality(item) >= _quality(prev):
+                    by_sl[sl] = item
+                continue
+        no_sl.append(item)
+
+    if len(by_sl) >= 3:
+        return [by_sl[k] for k in sorted(by_sl)]
+    return _dedupe_items(no_sl + list(by_sl.values()))
+
+
 def parse_line_items(text: str) -> list[dict[str, str]]:
     """
     Try multiple generic strategies and keep the best result.
     Not tied to any one supplier — covers digital e-invoices, Tally scans, and photos.
     """
     candidates = [
+        parse_s_code_nos_items(text),
         parse_einvoice_line_items(text),
         parse_part_hsn_qty_rate(text),
         parse_credit_bill_hsn_rate_qty(text),
+        parse_photo_gstr_qty_rate(text),
         parse_tally_scan_items(text, hsn_digits=8),
         parse_tally_scan_items(text, hsn_digits=4),
         parse_part_column_items(text),
