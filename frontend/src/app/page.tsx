@@ -196,7 +196,7 @@ export default function Home() {
       setStatus(totalItems ? "done" : "error");
       setMessage(
         totalItems
-          ? `Success: ${invoices.length} invoice(s), ${totalItems} line item(s). CSV downloaded (opens in Numbers). Also saved to: ${parsed.latest_csv || "output/latest.csv"}`
+          ? `Success: ${invoices.length} invoice(s), ${totalItems} line item(s). CSV downloaded. Also saved to: ${parsed.latest_csv || "output/latest.csv"}`
           : `Headers found but 0 line items. Open preview below. File saved to: ${parsed.latest_csv || "output/latest.csv"}`,
       );
     } catch (err) {
