@@ -6,8 +6,17 @@ import { SampleInvoiceGuide } from "../components/SampleInvoiceGuide";
 import { DoAndDonts } from "../components/DoAndDonts";
 
 const MAX_FILES = 10;
-/** Talk to FastAPI directly — more reliable for binary Excel downloads. */
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+/**
+ * API base URL:
+ * - Local: http://127.0.0.1:8000
+ * - Vercel: same origin (/api/...) — rewritten to Railway in vercel.json
+ * - Override anytime with NEXT_PUBLIC_API_URL
+ */
+const API_BASE =
+  process.env.NEXT_PUBLIC_API_URL ||
+  (typeof window !== "undefined" && window.location.hostname === "localhost"
+    ? "http://127.0.0.1:8000"
+    : "");
 
 type Status = "idle" | "converting" | "done" | "error";
 
