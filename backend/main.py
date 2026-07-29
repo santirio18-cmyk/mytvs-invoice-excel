@@ -36,7 +36,7 @@ CORS_ORIGINS = [o.strip() for o in _cors.split(",") if o.strip()] or ["*"]
 
 app = FastAPI(title="myTVS — Invoice to Excel", version="1.4.0")
 
-DEPLOY_MARK = "2026-07-29-vinayaka11-keepdup"
+DEPLOY_MARK = "2026-07-29-vinayaka11-final"
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
