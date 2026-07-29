@@ -66,6 +66,34 @@ def _fnum(val: str | None) -> float | None:
         return None
 
 
+def strip_part_from_description(it: dict[str, str]) -> dict[str, str]:
+    """Keep item code only in Part Number — remove duplicate from Description."""
+    part = str(it.get("part_number") or "").strip()
+    desc = str(it.get("description") or "").strip()
+    if not part or not desc:
+        return it
+    variants = {part, part.replace(" ", ""), re.sub(r"\s+", " ", part)}
+    for v in list(variants):
+        variants.add(v.upper())
+        variants.add(v.lower())
+    cleaned = desc
+    for v in sorted(variants, key=len, reverse=True):
+        if not v or len(v) < 3:
+            continue
+        pat = re.compile(rf"^{re.escape(v)}(\s*[-–:|/]\s*|\s+)", re.I)
+        cleaned2 = pat.sub("", cleaned, count=1)
+        if cleaned2 != cleaned:
+            cleaned = cleaned2
+            break
+        if re.fullmatch(re.escape(v), cleaned, re.I):
+            cleaned = ""
+            break
+    cleaned = cleaned.strip(" -–:|/")
+    it = dict(it)
+    it["description"] = cleaned
+    return it
+
+
 def repair_qty_mrp_shift(items: list[dict[str, str]], text: str = "") -> list[dict[str, str]]:
     """
     Stop MRP / discount landing in Qty (Ashok Qty→MRP→Dis%→Tax%→Amount layouts).
@@ -187,6 +215,7 @@ def validate_invoice(inv: dict[str, Any], text: str = "") -> dict[str, Any]:
         list(inv.get("line_items") or []),
         text or inv.get("raw_text_preview") or "",
     )
+    items = [strip_part_from_description(dict(it)) for it in items]
     inv = dict(inv)
     inv["line_items"] = items
 

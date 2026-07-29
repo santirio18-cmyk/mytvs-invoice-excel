@@ -36,7 +36,7 @@ CORS_ORIGINS = [o.strip() for o in _cors.split(",") if o.strip()] or ["*"]
 
 app = FastAPI(title="myTVS — Invoice to Excel", version="2.0.0")
 
-DEPLOY_MARK = "2026-07-29-csv-default"
+DEPLOY_MARK = "2026-07-29-karnavati-dedupe"
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -664,6 +664,7 @@ def _dedupe_items(items: list[dict[str, str]]) -> list[dict[str, str]]:
     seen: set[tuple] = set()
     unique: list[dict[str, str]] = []
     for it in items:
+        it = _strip_part_from_description(dict(it))
         # Drop garbage OCR rows
         try:
             amt = float(str(it.get("amount") or "0").replace(",", ""))
@@ -676,19 +677,33 @@ def _dedupe_items(items: list[dict[str, str]]) -> list[dict[str, str]]:
         if re.fullmatch(r"[\d\s,\.\-%]+", desc) and not it.get("part_number"):
             continue
 
-        key = (it.get("qty"), it.get("rate"), it.get("amount"))
-        desc_key = re.sub(r"\W+", "", desc.lower())[:24]
-        soft = (desc_key, it.get("amount"))
-        if key in seen or soft in seen:
+        part = str(it.get("part_number") or "").strip().upper()
+        desc_key = re.sub(r"\W+", "", desc.lower())[:40]
+        # Always key on part number when present — many AC/spare lines share qty/rate/amount
+        if part:
+            key = (part, it.get("qty"), it.get("rate"), it.get("amount"), desc_key)
+        else:
+            key = (it.get("qty"), it.get("rate"), it.get("amount"), desc_key)
+            # Soft match only when there is no part code (avoid wiping 50+ distinct SKUs)
+            soft = (desc_key[:24], it.get("amount"))
+            if soft in seen:
+                continue
+            seen.add(soft)
+        if key in seen:
             continue
         seen.add(key)
-        seen.add(soft)
         d = re.sub(r"^\d{1,3}[\)\.]\s+", "", desc)
         d = re.sub(r"\s+", " ", d).strip(" ,;.-")
         if len(d) >= 2 or it.get("part_number"):
             it["description"] = d
             unique.append(it)
     return unique
+
+
+def _strip_part_from_description(it: dict[str, str]) -> dict[str, str]:
+    from extraction.validate import strip_part_from_description
+
+    return strip_part_from_description(it)
 
 
 def parse_part_column_items(text: str) -> list[dict[str, str]]:
@@ -1469,7 +1484,7 @@ def parse_s_code_nos_items(text: str) -> list[dict[str, str]]:
         sl_raw = m.group("sl")
         if sl_raw:
             sl = int(sl_raw)
-            if 1 <= sl <= 80:
+            if 1 <= sl <= 250:
                 prev = by_sl.get(sl)
                 if not prev or _quality(item) >= _quality(prev):
                     twins = [
@@ -1511,9 +1526,14 @@ def parse_s_code_nos_items(text: str) -> list[dict[str, str]]:
                 by_sl[1] = by_sl.pop(hi)
 
         max_sl = max(by_sl)
-        # Don't gap-fill across huge holes from a single bad high SI
-        if max_sl - len(by_sl) > 3:
+        # Don't gap-fill across huge holes from a single bad high SI —
+        # but allow long invoices (80–150 lines) when coverage is dense.
+        hole = max_sl - len(by_sl)
+        if hole > 3 and len(by_sl) < 40:
             max_sl = max(k for k in by_sl if k <= len(by_sl) + 2) if by_sl else max_sl
+        elif hole > 15 and len(by_sl) >= 40:
+            # Dense long invoice with a few OCR gaps — still gap-fill within range
+            max_sl = max(by_sl)
 
         gaps = [i for i in range(1, max_sl + 1) if i not in by_sl]
         pool = list(no_sl)
@@ -1765,7 +1785,10 @@ def parse_line_items(text: str) -> list[dict[str, str]]:
             pass
         cleaned.append(it)
     if _item_score(cleaned) > 0:
-        return _repair_qty_mrp_shift(_normalize_shifted_hsn(cleaned), text)
+        return _repair_qty_mrp_shift(
+            [_strip_part_from_description(it) for it in _normalize_shifted_hsn(cleaned)],
+            text,
+        )
     return []
 
 
