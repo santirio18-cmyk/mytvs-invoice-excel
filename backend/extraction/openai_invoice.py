@@ -17,12 +17,13 @@ Return ONLY valid JSON with this shape:
   "place_of_supply": string,
   "taxable_total": string,
   "line_items": [
-    {"part_number": string, "description": string, "hsn_sac": string, "qty": string, "rate": string, "amount": string}
+    {"part_number": string, "description": string, "hsn_sac": string, "qty": string, "mrp": string, "rate": string, "amount": string}
   ]
 }
 Rules:
 - Include EVERY line item row, including duplicate SKUs listed twice.
 - qty may include unit (e.g. "50 nos").
+- If the invoice has an MRP column, fill mrp; rate is dealer/net rate (may be blank).
 - Prefer seller/supplier name, not the buyer (TVS / consignee).
 - If unsure, use empty string — never invent HSN/amounts.
 """
@@ -72,6 +73,7 @@ def extract_with_openai(image_bytes: bytes, mime: str = "image/png") -> dict[str
                 "description": str(it.get("description") or "").strip(),
                 "hsn_sac": str(it.get("hsn_sac") or "").strip(),
                 "qty": str(it.get("qty") or "").strip(),
+                "mrp": str(it.get("mrp") or "").strip(),
                 "rate": str(it.get("rate") or "").strip(),
                 "amount": str(it.get("amount") or "").strip(),
             }

@@ -36,7 +36,7 @@ CORS_ORIGINS = [o.strip() for o in _cors.split(",") if o.strip()] or ["*"]
 
 app = FastAPI(title="myTVS — Invoice to Excel", version="2.0.0")
 
-DEPLOY_MARK = "2026-07-29-extractor-v2"
+DEPLOY_MARK = "2026-07-29-mrp-col"
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -1286,6 +1286,70 @@ def _clone_item_to_match_subtotal(items: list[dict[str, str]], text: str) -> lis
     return items
 
 
+def parse_mrp_rate_items(text: str) -> list[dict[str, str]]:
+    """
+    Common spare-parts layout with MRP column:
+      Desc HSN Qty MRP Rate [Disc] Amount
+      OR Qty MRP Amount (rate blank — use MRP as selling reference)
+    """
+    items: list[dict[str, str]] = []
+    money = r"[\d,]+\.\d{2}"
+    row = re.compile(
+        r"(?P<head>.+?)\s+"
+        r"(?:(?P<hsn>\d{4,8})\s+)?"
+        r"(?P<qty>\d+(?:[.,]\d+)?)\s*"
+        r"(?P<unit>NOS|Nos|PCS|SET|PKT|PKTS)?\s+"
+        r"(?P<mrp>" + money + r")\s+"
+        r"(?:(?P<rate>" + money + r")\s+)?"
+        r"(?:(?P<disc>\d{1,2})\s*%?\s+)?"
+        r"(?P<amount>" + money + r")",
+        re.I,
+    )
+    for raw in text.splitlines():
+        ln = _clean(raw)
+        if not ln or STOP_ITEM.search(ln):
+            continue
+        if not re.search(r"(?i)mrp", text[:800]) and not re.search(rf"{money}\s+{money}\s+{money}", ln):
+            # Still allow rows with 3 money values (mrp/rate/amount) without header
+            if len(re.findall(money, ln)) < 2:
+                continue
+        m = row.search(ln)
+        if not m:
+            continue
+        head = _clean(m.group("head"))
+        head = re.sub(r"^\d{1,3}[\)\.\s]+", "", head)
+        part, desc = "", head
+        tokens = head.split()
+        if tokens and re.search(r"[A-Za-z]", tokens[0]) and re.search(r"\d", tokens[0]):
+            part, desc = tokens[0], " ".join(tokens[1:]) or tokens[0]
+        mrp = m.group("mrp")
+        rate = m.group("rate") or ""
+        amount = m.group("amount")
+        # If only two moneys matched as mrp+amount, rate empty — keep MRP separate
+        moneys = re.findall(money, ln)
+        if len(moneys) >= 3:
+            mrp, rate, amount = moneys[-3], moneys[-2], moneys[-1]
+        elif len(moneys) == 2:
+            mrp, amount = moneys[0], moneys[1]
+            rate = ""
+        unit = (m.group("unit") or "").strip()
+        qty = m.group("qty")
+        if re.fullmatch(r"\d{4,8}", qty) and not unit:
+            continue
+        items.append(
+            {
+                "part_number": part,
+                "description": desc,
+                "hsn_sac": m.group("hsn") or "",
+                "qty": f"{qty} {unit}".strip(),
+                "mrp": mrp,
+                "rate": rate or mrp,  # Excel Rate falls back to MRP when dealer rate missing
+                "amount": amount,
+            }
+        )
+    return _dedupe_items(items)
+
+
 def parse_line_items(text: str) -> list[dict[str, str]]:
     """
     Try multiple generic strategies and keep the best result.
@@ -1294,6 +1358,7 @@ def parse_line_items(text: str) -> list[dict[str, str]]:
     candidates = [
         parse_s_code_nos_items(text),
         parse_einvoice_line_items(text),
+        parse_mrp_rate_items(text),
         parse_part_hsn_qty_rate(text),
         parse_credit_bill_hsn_rate_qty(text),
         parse_photo_gstr_qty_rate(text),
@@ -1449,7 +1514,7 @@ def write_invoice_sheet(wb: Workbook, data: dict[str, Any], is_first: bool) -> N
         ws.cell(r, 1, label)
         ws.cell(r, 2, value)
 
-    headers = ["Part Number", "Description", "Qty", "Rate", "Amount", "HSN/SAC"]
+    headers = ["Part Number", "Description", "Qty", "MRP", "Rate", "Amount", "HSN/SAC"]
     start_row = 7
     for col, h in enumerate(headers, 1):
         cell = ws.cell(start_row, col, h)
@@ -1464,16 +1529,18 @@ def write_invoice_sheet(wb: Workbook, data: dict[str, Any], is_first: bool) -> N
             ws.cell(row, 1, str(item.get("part_number") or ""))
             ws.cell(row, 2, str(item.get("description") or ""))
             ws.cell(row, 3, str(item.get("qty") or ""))
-            ws.cell(row, 4, str(item.get("rate") or ""))
-            ws.cell(row, 5, str(item.get("amount") or ""))
-            ws.cell(row, 6, str(item.get("hsn_sac") or ""))
+            ws.cell(row, 4, str(item.get("mrp") or ""))
+            ws.cell(row, 5, str(item.get("rate") or ""))
+            ws.cell(row, 6, str(item.get("amount") or ""))
+            ws.cell(row, 7, str(item.get("hsn_sac") or ""))
 
     ws.column_dimensions["A"].width = 22
     ws.column_dimensions["B"].width = 40
     ws.column_dimensions["C"].width = 12
     ws.column_dimensions["D"].width = 12
-    ws.column_dimensions["E"].width = 14
+    ws.column_dimensions["E"].width = 12
     ws.column_dimensions["F"].width = 14
+    ws.column_dimensions["G"].width = 14
 
 
 def build_workbook(invoices: list[dict[str, Any]]) -> bytes:
@@ -1498,6 +1565,7 @@ def build_csv(invoices: list[dict[str, Any]]) -> bytes:
             "Part Number",
             "Description",
             "Qty",
+            "MRP",
             "Rate",
             "Amount",
             "HSN/SAC",
@@ -1511,6 +1579,7 @@ def build_csv(invoices: list[dict[str, Any]]) -> bytes:
                 "description": "No line items detected",
                 "hsn_sac": "",
                 "qty": "",
+                "mrp": "",
                 "rate": "",
                 "amount": "",
             }
@@ -1525,6 +1594,7 @@ def build_csv(invoices: list[dict[str, Any]]) -> bytes:
                     it.get("part_number", ""),
                     it.get("description", ""),
                     it.get("qty", ""),
+                    it.get("mrp", ""),
                     it.get("rate", ""),
                     it.get("amount", ""),
                     it.get("hsn_sac", ""),

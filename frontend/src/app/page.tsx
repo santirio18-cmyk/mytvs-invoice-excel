@@ -25,6 +25,7 @@ type LineItem = {
   description?: string;
   hsn_sac?: string;
   qty?: string;
+  mrp?: string;
   rate?: string;
   amount?: string;
 };
@@ -421,6 +422,7 @@ export default function Home() {
                       <th className="px-3 py-2.5 font-semibold">Part Number</th>
                       <th className="px-3 py-2.5 font-semibold">Description</th>
                       <th className="px-3 py-2.5 font-semibold">Qty</th>
+                      <th className="px-3 py-2.5 font-semibold">MRP</th>
                       <th className="px-3 py-2.5 font-semibold">Rate</th>
                       <th className="px-3 py-2.5 font-semibold">Amount</th>
                       <th className="px-3 py-2.5 font-semibold">HSN/SAC</th>
@@ -432,6 +434,7 @@ export default function Home() {
                         <td className="px-3 py-2 text-ink">{it.part_number}</td>
                         <td className="px-3 py-2 text-ink">{it.description}</td>
                         <td className="px-3 py-2 text-ink">{it.qty}</td>
+                        <td className="px-3 py-2 text-ink">{it.mrp}</td>
                         <td className="px-3 py-2 text-ink">{it.rate}</td>
                         <td className="px-3 py-2 text-ink">{it.amount}</td>
                         <td className="px-3 py-2 text-ink">{it.hsn_sac}</td>
@@ -439,7 +442,7 @@ export default function Home() {
                     ))}
                     {!inv.line_items?.length && (
                       <tr>
-                        <td colSpan={6} className="px-3 py-4 text-warn">
+                        <td colSpan={7} className="px-3 py-4 text-warn">
                           No line items detected for this file.
                         </td>
                       </tr>
