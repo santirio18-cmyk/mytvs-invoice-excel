@@ -36,7 +36,7 @@ CORS_ORIGINS = [o.strip() for o in _cors.split(",") if o.strip()] or ["*"]
 
 app = FastAPI(title="myTVS — Invoice to Excel", version="1.4.0")
 
-DEPLOY_MARK = "2026-07-29-vinayaka-11fix"
+DEPLOY_MARK = "2026-07-29-v11-clean"
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -1211,33 +1211,8 @@ def parse_s_code_nos_items(text: str) -> list[dict[str, str]]:
         out = [by_sl[k] for k in sorted(by_sl)]
         out.extend(extras)
 
-        # Duplicate SKUs: OCR often keeps only one row when SI Nos 5+6 are the same part.
-        # If text shows two different SI Nos for the same S-code, clone the kept row.
-        sl_for_part: dict[str, set[int]] = {}
-        for m in re.finditer(
-            r"(?i)(?:^|[\s|])(?P<sl>\d{1,2})\s*[S$]\s*(?P<num>\d{3,5}[A-Za-z]?)\b",
-            text,
-        ):
-            part_key = f"S {m.group('num')}".upper().replace("  ", " ")
-            sl_for_part.setdefault(part_key, set()).add(int(m.group("sl")))
-        for part_key, sls in sl_for_part.items():
-            if len(sls) < 2:
-                continue
-            have = [it for it in out if it["part_number"].upper().replace("  ", " ") == part_key]
-            need = len(sls) - len(have)
-            if need > 0 and have:
-                for _ in range(need):
-                    out.append(dict(have[0]))
-
-        # Subtotal repair only when short of the highest SI No seen
-        max_sl = max(by_sl)
-        if len(out) < max_sl:
-            out = _clone_item_to_match_subtotal(out, text)
-        elif len(out) == max_sl:
-            # Still allow one repair if totals clearly short (duplicate under same SI OCR miss)
-            repaired = _clone_item_to_match_subtotal(out, text)
-            if len(repaired) == len(out) + 1:
-                out = repaired
+        # Fill at most one missing small duplicate row using printed taxable total
+        out = _clone_item_to_match_subtotal(out, text)
         return out
     return _dedupe_items(no_sl + list(by_sl.values()))
 
