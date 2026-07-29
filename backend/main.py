@@ -36,7 +36,7 @@ CORS_ORIGINS = [o.strip() for o in _cors.split(",") if o.strip()] or ["*"]
 
 app = FastAPI(title="myTVS — Invoice to Excel", version="1.4.0")
 
-DEPLOY_MARK = "2026-07-29-v11-ghost"
+DEPLOY_MARK = "2026-07-29-v11-order"
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -1200,6 +1200,12 @@ def parse_s_code_nos_items(text: str) -> list[dict[str, str]]:
                 keys = sorted(by_sl)
                 continue
             break
+
+        # If SI 1 is missing but a high SI holds the first SKU, move it to slot 1
+        if 1 not in by_sl and by_sl:
+            hi = max(by_sl)
+            if hi > len(by_sl):
+                by_sl[1] = by_sl.pop(hi)
 
         max_sl = max(by_sl)
         # Don't gap-fill across huge holes from a single bad high SI
