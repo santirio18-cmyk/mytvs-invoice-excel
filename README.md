@@ -5,6 +5,26 @@ Public tool (no login). Upload up to **10 invoices** (PDF or clear scan) and dow
 Line items: **Part Number, Description, HSN/SAC, Qty, Rate, Amount**  
 Sheet names: `Invoice No · Supplier · Date`
 
+### Extraction (v2 — how market tools work)
+1. **Invoice AI** when configured — OpenAI vision (`gpt-4o`) or **AWS Textract AnalyzeExpense**
+2. **Layout/table OCR** — reconstructs rows from word positions (not only text lines)
+3. **Rule parsers** — GST / Tally / photo fallbacks
+4. **Validation** — line-item sum vs taxable total + confidence warnings in the UI
+
+Set on Railway (recommended for production accuracy):
+
+```bash
+EXTRACTOR=auto
+OPENAI_API_KEY=sk-...
+# or
+TEXTRACT_ENABLED=true
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+AWS_REGION=ap-south-1
+```
+
+Without keys, the app still runs on Tesseract + layout + validation.
+
 ---
 
 ## Local development

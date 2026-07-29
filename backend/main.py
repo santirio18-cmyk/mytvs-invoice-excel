@@ -34,9 +34,9 @@ PDF_EXTS = {".pdf"}
 _cors = os.getenv("CORS_ORIGINS", "*").strip()
 CORS_ORIGINS = [o.strip() for o in _cors.split(",") if o.strip()] or ["*"]
 
-app = FastAPI(title="myTVS — Invoice to Excel", version="1.4.0")
+app = FastAPI(title="myTVS — Invoice to Excel", version="2.0.0")
 
-DEPLOY_MARK = "2026-07-29-v11-order"
+DEPLOY_MARK = "2026-07-29-extractor-v2"
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -1309,16 +1309,29 @@ def parse_line_items(text: str) -> list[dict[str, str]]:
 
 
 def extract_invoice(data: bytes, filename: str) -> dict[str, Any]:
-    text = extract_text(data, filename)
-    return {
-        "filename": filename,
-        "invoice_number": find_invoice_number(text),
-        "supplier_name": find_supplier(text),
-        "date": find_date(text),
-        "place_of_supply": find_place_of_supply(text),
-        "line_items": parse_line_items(text),
-        "raw_text_preview": text[:3500],
-    }
+    """
+    Permanent pipeline: optional invoice AI (OpenAI / Textract) → layout tables →
+    legacy parsers → total validation + confidence.
+    """
+    from extraction.pipeline import extract_invoice_v2
+
+    def _legacy_from_text(text: str) -> dict[str, Any]:
+        return {
+            "invoice_number": find_invoice_number(text),
+            "supplier_name": find_supplier(text),
+            "date": find_date(text),
+            "place_of_supply": find_place_of_supply(text),
+            "line_items": parse_line_items(text),
+            "raw_text_preview": text[:3500],
+            "extractor": "tesseract_rules",
+        }
+
+    return extract_invoice_v2(
+        data,
+        filename,
+        legacy_extract_text=extract_text,
+        legacy_parse=_legacy_from_text,
+    )
 
 
 def merge_by_invoice(invoices: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1341,9 +1354,19 @@ def merge_by_invoice(invoices: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for p in pages:
             files.append(p["filename"])
             items.extend(p.get("line_items") or [])
-            for field in ("supplier_name", "date", "place_of_supply", "invoice_number"):
+            for field in ("supplier_name", "date", "place_of_supply", "invoice_number", "extractor", "confidence"):
                 if base.get(field) in (None, "", "Unknown") and p.get(field) not in (None, "", "Unknown"):
                     base[field] = p[field]
+            if p.get("warnings"):
+                base.setdefault("warnings", [])
+                for w in p["warnings"]:
+                    if w not in base["warnings"]:
+                        base["warnings"].append(w)
+            if p.get("confidence_score") and (
+                not base.get("confidence_score") or p["confidence_score"] > base.get("confidence_score", 0)
+            ):
+                base["confidence_score"] = p["confidence_score"]
+                base["confidence"] = p.get("confidence") or base.get("confidence")
         # Dedupe only when stitching multiple pages/files of the same invoice.
         # A single page may intentionally list the same SKU twice — keep those rows.
         if len(pages) == 1:
@@ -1545,7 +1568,22 @@ def save_outputs(invoices: list[dict[str, Any]], stamp: str) -> Path:
 
 @app.get("/api/health")
 def health() -> dict[str, str]:
-    return {"status": "ok", "version": app.version, "build": DEPLOY_MARK}
+    extractors = ["tesseract_rules", "tesseract_layout"]
+    try:
+        from extraction import openai_invoice, textract_invoice
+
+        if openai_invoice.available():
+            extractors.append("openai")
+        if textract_invoice.available():
+            extractors.append("textract")
+    except Exception:
+        pass
+    return {
+        "status": "ok",
+        "version": app.version,
+        "build": DEPLOY_MARK,
+        "extractors": ",".join(extractors),
+    }
 
 
 async def _load_invoices(files: list[UploadFile]) -> tuple[list[dict[str, Any]], list[str]]:
@@ -1603,6 +1641,12 @@ async def parse(files: list[UploadFile] = File(...)) -> JSONResponse:
                 "filename": inv.get("filename"),
                 "line_items": inv.get("line_items") or [],
                 "item_count": len(inv.get("line_items") or []),
+                "confidence": inv.get("confidence") or "medium",
+                "confidence_score": inv.get("confidence_score"),
+                "warnings": inv.get("warnings") or [],
+                "extractor": inv.get("extractor") or "tesseract_rules",
+                "items_sum": inv.get("items_sum"),
+                "taxable_total": inv.get("taxable_total"),
             }
         )
     return JSONResponse(

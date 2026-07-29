@@ -37,6 +37,12 @@ type InvoiceResult = {
   filename: string;
   item_count: number;
   line_items: LineItem[];
+  confidence?: string;
+  confidence_score?: number;
+  warnings?: string[];
+  extractor?: string;
+  items_sum?: number;
+  taxable_total?: number;
 };
 
 function formatBytes(n: number) {
@@ -385,7 +391,30 @@ export default function Home() {
                   {inv.place_of_supply}
                   {" · "}
                   {inv.item_count} items
+                  {inv.confidence && (
+                    <>
+                      {" · "}
+                      <span
+                        className={
+                          inv.confidence === "high"
+                            ? "font-semibold text-emerald-700"
+                            : inv.confidence === "low"
+                              ? "font-semibold text-warn"
+                              : "font-semibold text-tvs-orange"
+                        }
+                      >
+                        {inv.confidence} confidence
+                      </span>
+                    </>
+                  )}
                 </div>
+                {!!inv.warnings?.length && (
+                  <ul className="space-y-1 border-b border-line bg-[#FFF8F0] px-4 py-3 text-sm text-ink">
+                    {inv.warnings.map((w) => (
+                      <li key={w}>⚠ {w}</li>
+                    ))}
+                  </ul>
+                )}
                 <table className="w-full min-w-[640px] text-left text-sm">
                   <thead className="bg-tvs-blue text-white">
                     <tr>
@@ -421,6 +450,9 @@ export default function Home() {
                   <p className="px-4 py-2 text-xs text-ink-soft/70">
                     Showing first 30 of {inv.item_count} rows — full data is in the Excel file.
                   </p>
+                )}
+                {inv.extractor && (
+                  <p className="px-4 py-2 text-xs text-ink-soft/60">Extractor: {inv.extractor}</p>
                 )}
               </div>
             ))}
