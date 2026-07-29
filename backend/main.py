@@ -36,7 +36,7 @@ CORS_ORIGINS = [o.strip() for o in _cors.split(",") if o.strip()] or ["*"]
 
 app = FastAPI(title="myTVS — Invoice to Excel", version="1.4.0")
 
-DEPLOY_MARK = "2026-07-29-vinayaka-11ok"
+DEPLOY_MARK = "2026-07-29-vinayaka-11fix"
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -1279,16 +1279,16 @@ def _clone_item_to_match_subtotal(items: list[dict[str, str]], text: str) -> lis
 
     for total in sorted(set(candidates)):
         diff = round(total - item_sum, 2)
-        if diff <= 0.05:
+        # Duplicate SKUs are almost always small lines; never clone a large header amount
+        if diff <= 0.05 or diff > 250:
             continue
-        # Prefer cloning the smallest matching line (duplicate cable rows, not the header SKU)
         matches = []
         for it in items:
             try:
                 amt = float(str(it.get("amount") or "0").replace(",", ""))
             except Exception:
                 continue
-            if abs(amt - diff) <= 0.05:
+            if abs(amt - diff) <= 0.05 and amt <= 250:
                 matches.append(it)
         if matches:
             matches.sort(key=lambda x: float(str(x.get("amount") or "0").replace(",", "")))
