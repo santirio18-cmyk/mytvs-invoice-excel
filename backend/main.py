@@ -36,7 +36,7 @@ CORS_ORIGINS = [o.strip() for o in _cors.split(",") if o.strip()] or ["*"]
 
 app = FastAPI(title="myTVS — Invoice to Excel", version="1.4.0")
 
-DEPLOY_MARK = "2026-07-29-v11-clean"
+DEPLOY_MARK = "2026-07-29-v11-and"
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -1204,7 +1204,8 @@ def parse_s_code_nos_items(text: str) -> list[dict[str, str]]:
         present_parts = {v["part_number"] for v in by_sl.values()}
         extras: list[dict[str, str]] = []
         for cand in pool:
-            if cand["amount"] not in present_amts or cand["part_number"] not in present_parts:
+            # Only append rows that are new on BOTH part and amount (trailing lines)
+            if cand["amount"] not in present_amts and cand["part_number"] not in present_parts:
                 extras.append(cand)
                 present_amts.add(cand["amount"])
                 present_parts.add(cand["part_number"])
