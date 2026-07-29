@@ -176,35 +176,25 @@ export default function Home() {
 
       const totalItems = invoices.reduce((n, inv) => n + (inv.item_count || 0), 0);
 
-      const formCsv = new FormData();
-      files.forEach((f) => formCsv.append("files", f));
-      const csvRes = await fetch(`${API_BASE}/api/convert-csv`, { method: "POST", body: formCsv });
-      if (!csvRes.ok) throw new Error("CSV download failed.");
-      const csvBlob = await csvRes.blob();
-      if (csvBlob.size < 20) throw new Error("CSV came back empty — is backend running?");
-      const csvName =
-        (csvRes.headers.get("Content-Disposition") || "").match(/filename="?([^"]+)"?/)?.[1] ||
-        "invoices.csv";
-      const nextCsvUrl = triggerDownload(csvBlob, csvName);
-      setCsvUrl(nextCsvUrl);
-
+      // One download only: ZIP contains Excel (.xlsx) + CSV
       const formZip = new FormData();
       files.forEach((f) => formZip.append("files", f));
       const zipRes = await fetch(`${API_BASE}/api/convert`, { method: "POST", body: formZip });
-      if (zipRes.ok) {
-        const zipBlob = await zipRes.blob();
-        const zipName =
-          (zipRes.headers.get("Content-Disposition") || "").match(/filename="?([^"]+)"?/)?.[1] ||
-          "invoices.zip";
-        const nextZipUrl = triggerDownload(zipBlob, zipName);
-        setZipUrl(nextZipUrl);
-      }
+      if (!zipRes.ok) throw new Error("Download failed.");
+      const zipBlob = await zipRes.blob();
+      if (zipBlob.size < 20) throw new Error("Download came back empty — is backend running?");
+      const zipName =
+        (zipRes.headers.get("Content-Disposition") || "").match(/filename="?([^"]+)"?/)?.[1] ||
+        "invoices.zip";
+      const nextZipUrl = triggerDownload(zipBlob, zipName);
+      setZipUrl(nextZipUrl);
+      setCsvUrl(null);
 
       setStatus(totalItems ? "done" : "error");
       setMessage(
         totalItems
-          ? `Success: ${invoices.length} invoice(s), ${totalItems} line item(s). CSV downloaded. Also saved to: ${parsed.latest_csv || "output/latest.csv"}`
-          : `Headers found but 0 line items. Open preview below. File saved to: ${parsed.latest_csv || "output/latest.csv"}`,
+          ? `Success: ${invoices.length} invoice(s), ${totalItems} line item(s). Downloaded ZIP (Excel + CSV).`
+          : `Headers found but 0 line items. Open preview below.`,
       );
     } catch (err) {
       setStatus("error");
@@ -328,26 +318,17 @@ export default function Home() {
                       Converting…
                     </>
                   ) : (
-                    "Generate Excel / CSV"
+                    "Generate Excel"
                   )}
                 </button>
 
-                {csvUrl && (
-                  <a
-                    href={csvUrl}
-                    download="invoices.csv"
-                    className="inline-flex items-center justify-center bg-tvs-orange px-6 py-3.5 text-sm font-bold tracking-wide text-white transition hover:bg-tvs-orange-deep"
-                  >
-                    Download CSV again
-                  </a>
-                )}
                 {zipUrl && (
                   <a
                     href={zipUrl}
                     download="invoices.zip"
-                    className="inline-flex items-center justify-center border border-tvs-blue px-6 py-3.5 text-sm font-bold tracking-wide text-tvs-blue transition hover:bg-tvs-blue hover:text-white"
+                    className="inline-flex items-center justify-center bg-tvs-orange px-6 py-3.5 text-sm font-bold tracking-wide text-white transition hover:bg-tvs-orange-deep"
                   >
-                    Download ZIP (CSV+XLSX)
+                    Download ZIP again
                   </a>
                 )}
               </div>
