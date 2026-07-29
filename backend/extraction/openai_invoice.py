@@ -23,7 +23,9 @@ Return ONLY valid JSON with this shape:
 Rules:
 - Include EVERY line item row, including duplicate SKUs listed twice.
 - qty may include unit (e.g. "50 nos").
-- If the invoice has an MRP column, fill mrp; rate is dealer/net rate (may be blank).
+- If the invoice has an MRP column, fill mrp. When there is no separate Rate column
+  (Qty → MRP → Dis% → Tax% → Amount), put the MRP in mrp and set rate to Amount/Qty
+  (net unit price), not the discount percent.
 - Prefer seller/supplier name, not the buyer (TVS / consignee).
 - If unsure, use empty string — never invent HSN/amounts.
 """

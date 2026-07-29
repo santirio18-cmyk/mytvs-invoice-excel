@@ -75,6 +75,21 @@ def extract_items_from_image(img: Image.Image) -> list[dict[str, str]]:
         # Need qty-like + rate/amount pattern
         amount = moneys[-1]
         rate = moneys[-2] if len(moneys) >= 2 else ""
+        mrp = ""
+        # Qty MRP Dis% Tax% Amount → first money is MRP; middles look like percents
+        if len(moneys) >= 3:
+            try:
+                mids = [float(x.replace(",", "")) for x in moneys[1:-1]]
+            except Exception:
+                mids = []
+            if mids and all(v <= 100 for v in mids):
+                mrp = moneys[0]
+                rate = ""
+                try:
+                    # derive net rate later from qty*amount
+                    pass
+                except Exception:
+                    pass
         # qty: last integer-like token before moneys
         qty = ""
         unit = ""
@@ -129,12 +144,22 @@ def extract_items_from_image(img: Image.Image) -> list[dict[str, str]]:
             else:
                 desc = " ".join(desc_tokens)
 
+        if mrp and not rate:
+            try:
+                q = float(qty.replace(",", ""))
+                a = float(amount.replace(",", ""))
+                if q > 0:
+                    rate = f"{a / q:.2f}"
+            except Exception:
+                rate = mrp
+
         items.append(
             {
                 "part_number": part.replace("$", "S"),
                 "description": desc.strip(" -|")[:120],
                 "hsn_sac": hsn,
                 "qty": f"{qty} {unit}".strip(),
+                "mrp": mrp,
                 "rate": rate,
                 "amount": amount,
             }

@@ -36,7 +36,7 @@ CORS_ORIGINS = [o.strip() for o in _cors.split(",") if o.strip()] or ["*"]
 
 app = FastAPI(title="myTVS — Invoice to Excel", version="2.0.0")
 
-DEPLOY_MARK = "2026-07-29-mrp-col"
+DEPLOY_MARK = "2026-07-29-mrp-disc"
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -117,6 +117,21 @@ def ocr_image(img: Image.Image) -> str:
     return "\n".join([full, full6, tr, mid_txt, lower_txt])
 
 
+def _looks_like_email_screenshot(text: str) -> bool:
+    hits = 0
+    for pat in (
+        r"(?i)summarize this email",
+        r"(?i)all folders",
+        r"(?i)google api",
+        r"(?i)onedrive",
+        r"(?i)download.*full\s*scree",
+        r"(?i)inbox|outlook|mail\.google",
+    ):
+        if re.search(pat, text):
+            hits += 1
+    return hits >= 2
+
+
 def extract_text_from_pdf(data: bytes) -> str:
     """
     Extract text from PDF.
@@ -186,7 +201,18 @@ def _text_looks_useful(text: str) -> bool:
 
 
 def extract_text_from_image(data: bytes) -> str:
-    return ocr_image(Image.open(io.BytesIO(data)))
+    img = Image.open(io.BytesIO(data))
+    chunks = [ocr_image(img)]
+    # Outlook/Gmail desktop screenshots: invoice sits in the left attachment pane
+    w, h = img.size
+    if w >= int(h * 1.45):
+        left = img.crop((int(w * 0.01), int(h * 0.10), int(w * 0.52), int(h * 0.98)))
+        left_txt = ocr_image(left)
+        chunks.append(left_txt)
+        if _looks_like_email_screenshot(chunks[0]):
+            # Prefer left-pane text first so header parsers see Invoice No / Date cleanly
+            chunks = [left_txt, chunks[0]]
+    return "\n".join(chunks)
 
 
 def extract_text(data: bytes, filename: str) -> str:
@@ -294,11 +320,13 @@ def find_invoice_number(text: str) -> str:
     for pat in (
         re.compile(r"Bill\s*No\.?\s*[:\-]?\s*([A-Z0-9][A-Z0-9\/\-]*)", re.I),
         re.compile(
-            r"(?:DLR\s*)?Invoice\s*(?:No|Number|Sl\.?\s*No)\.?\s*[:\-]?\s*"
-            r"(?:[^\nA-Z0-9]{0,20})?([A-Z0-9][A-Z0-9\/\-]{2,})",
+            r"(?:DLR\s*)?Inv(?:oice|oce)?\s*(?:No|Number|Sl\.?\s*No)\.?\s*[:\-]?\s*"
+            r"(?:[^\nA-Z0-9]{0,20})?([A-Z0-9][A-Z0-9\/\-]{1,})",
             re.I,
         ),
-        re.compile(r"(?:Inv|te)\s*No\.?\s*[:\-]?\s*([A-Z0-9][A-Z0-9\/\-]{2,})", re.I),  # OCR: teNo.
+        re.compile(r"(?:Inv|te)\s*No\.?\s*[:\-]?\s*([A-Z0-9][A-Z0-9\/\-]{1,})", re.I),  # OCR: teNo.
+        # Handwritten / sparse: Invoice No | 160
+        re.compile(r"Inv[a-z]{0,6}\s*No\.?\s*[|:.\- ]+\s*(\d{2,6})\b", re.I),
     ):
         m = pat.search(text)
         if m:
@@ -334,22 +362,71 @@ def find_date(text: str) -> str:
         r"Invoice\s*Date[d]?\s*[:\-]?\s*"
         r"(\d{1,2}[\-\/\.]\s*(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[\-\/\.]?\s*\d{2,4}"
         r"|\d{1,2}[\-\/\.]\d{1,2}[\-\/\.]\d{2,4})",
-        r"(?<!Ack\s)(?<!Ack)Date[d]?\s*[:\-]?\s*"
+        r"(?<!Ack\s)(?<!Ack)(?:Date|Pate|Dal)[d]?\s*[:\-|=]?\s*"
         r"(\d{1,2}[\-\/\.]\s*(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[\-\/\.]?\s*\d{2,4}"
         r"|\d{1,2}[\-\/\.]\d{1,2}[\-\/\.]\d{2,4})",
+        # Handwritten: Date 16.07.2026 / 16. 07. 2026
+        r"(?:Date|Pate)\s*[:\-|=]?\s*(\d{1,2}\s*[\.]\s*\d{1,2}\s*[\.]\s*\d{2,4})",
     ):
         labeled = re.search(pat, text, re.I)
         if labeled:
-            return _clean(labeled.group(1)).replace(" ", "")
-    # Prefer numeric dd-m-yyyy / dd-mm-yyyy near top (photo OCR often has 25-7-2026)
-    top = "\n".join(text.splitlines()[:40])
-    m = re.search(r"\b(\d{1,2}-\d{1,2}-\d{4})\b", top)
-    if m:
+            return re.sub(r"\s+", "", _clean(labeled.group(1)))
+    top = "\n".join(text.splitlines()[:50])
+    # Prefer Indian dd.mm.yyyy / dd-mm-yyyy over US m/d/yyyy email stamps.
+    # Skip dates that only appear inside zip/file names (Testing 28.7.2026.zip).
+    def _ok_date(val: str, blob: str) -> bool:
+        for m in re.finditer(re.escape(val), blob):
+            ctx = blob[max(0, m.start() - 24) : m.end() + 12]
+            if re.search(r"(?i)\.(?:zip|pdf|xlsx?|jpe?g|png)\b", ctx):
+                continue
+            if re.search(r"(?i)testing\s+" + re.escape(val), ctx):
+                continue
+            return True
+        return False
+
+    for blob in (top, text):
+        m = re.search(r"\b(\d{1,2}\.\d{1,2}\.\d{4})\b", blob)
+        if m and _ok_date(m.group(1), blob):
+            return m.group(1)
+        m = re.search(r"\b(\d{1,2}-\d{1,2}-\d{4})\b", blob)
+        if m and _ok_date(m.group(1), blob):
+            return m.group(1)
+    # Labeled but OCR-noisy: Date i6.0 / Pate 16.0%, 2024 (= 16.07.2026)
+    noisy = re.search(
+        r"(?i)(?:invoice|inv[a-z]*\s*no|date|pate)\D{0,24}"
+        r"(\d{1,2})\D{0,3}(?:(0\s*[%7])|(\d{1,2}))\D{0,3}(20\d{2})",
+        text,
+    )
+    if noisy:
+        d = int(noisy.group(1))
+        if noisy.group(2):
+            mo = 7  # 0% / 07 OCR of July
+        else:
+            mo = int(noisy.group(3) or "0")
+        y = noisy.group(4)
+        # Handwritten year OCR often drifts (2024 vs 2026)
+        if y in {"2023", "2024", "2025"} and re.search(r"\b2026\b", text):
+            y = "2026"
+        if 1 <= d <= 31 and 1 <= mo <= 12:
+            return f"{d}.{mo}.{y}"
+    # Never treat email client timestamps as invoice date
+    def _is_email_stamp(val: str, blob: str) -> bool:
+        return bool(re.search(re.escape(val) + r"\s+\d{1,2}[:.]\d{2}", blob))
+
+    m = re.search(r"\b(\d{1,2}/\d{1,2}/\d{4})\b", top)
+    if m and not _is_email_stamp(m.group(1), top):
+        return m.group(1)
+    for m in re.finditer(r"\b(\d{1,2}/\d{1,2}/\d{4})\b", text):
+        if _is_email_stamp(m.group(1), text[max(0, m.start()) : m.end() + 16]):
+            continue
         return m.group(1)
     for pat in DATE_PATTERNS[1:]:
         m = pat.search(text)
         if m:
-            return _clean(m.group(1)).replace(" ", "")
+            val = _clean(m.group(1)).replace(" ", "")
+            if _is_email_stamp(val, text):
+                continue
+            return val
     return "Unknown"
 
 
@@ -360,7 +437,8 @@ def find_supplier(text: str) -> str:
     cut = len(lines)
     for i, ln in enumerate(lines[:40]):
         if re.search(
-            r"(?i)^(buyer|bill\s*to|consignee|ship\s*to|to[,\.]?\s|customer\s*name|tvs\s+auto)",
+            r"(?i)^(buyer|bill\s*to|consignee|ship\s*to|to[,\.]?\s|customer\s*name|"
+            r"tvs\b|details\s*of\s*receiver|receiver\s*\()",
             ln,
         ):
             cut = i
@@ -378,7 +456,7 @@ def find_supplier(text: str) -> str:
     )
     company_word = re.compile(
         r"(?i)\b(AGENCY|AGENCIES|MOTORS|AUTO|PRIVATE|LIMITED|PVT|TRADERS|ENTERPRISES|"
-        r"SERVICE|SOLUTIONS|INDUSTRIES|CORPORATION|COMPANY|DEALER|LIGHT)\b",
+        r"SERVICE|SOLUTIONS|INDUSTRIES|CORPORATION|COMPANY|DEALER|LIGHT|COVERS|GEAR)\b",
     )
 
     scored: list[tuple[int, str]] = []
@@ -409,8 +487,10 @@ def find_supplier(text: str) -> str:
         if re.search(r"(?i)\b(agenc(?:y|ies)|motors|traders|enterprises)\b", cand):
             score += 2
         # Prefer seller-side words; downrank buyer-ish if leaked
-        if re.search(r"(?i)\b(TVS AUTOMOBILE SOLUTIONS|BILL TO|BUYER)\b", cand):
+        if re.search(r"(?i)\b(TVS AUTOMOBILE SOLUTIONS|TVS\s+SMART|BILL TO|BUYER)\b", cand):
             score -= 4
+        if re.search(r"(?i)\balagu\b|\bashok\s*agenc", cand):
+            score += 4
         # Downrank OCR noise / website / bank lines
         if re.search(r"(?i)mahindra\s*bank|website|wob\s*sita|tamil\s*nady", cand):
             score -= 5
@@ -871,17 +951,126 @@ def parse_part_hsn_qty_rate(text: str) -> list[dict[str, str]]:
     """
     PartNo Description HSN Qty [Unit] Rate [Tax%] Amount
     (no serial number prefix — common on credit bills)
+
+    Also handles Leyland/Ashok MRP layouts where Rate is absent:
+      Qty MRP Dis% Tax% Amount  → fill mrp, derive rate from amount/qty
     """
     items: list[dict[str, str]] = []
+    money = r"[\d,]+\.\d{2}"
     row = re.compile(
         r"(?P<part>[A-Z][A-Z0-9][A-Z0-9\-]{3,})\s+"
-        r"(?P<desc>[A-Za-z][A-Za-z0-9 \/\.\-]{2,}?)\s+"
+        r"(?P<desc>[A-Za-z][A-Za-z0-9 \/\.\-\&\(\)]{2,}?)\s+"
         r"(?P<hsn>\d{4,8})\s+"
         r"(?P<qty>\d+(?:[.,]\d+)?)\s*"
         r"(?P<unit>NOS-?|Nos|PCS|SET|SETS|ROLL)?\s+"
-        r"(?P<rate>[\d,]+\.\d{2})\s+"
+        r"(?P<rate>" + money + r")\s+"
         r"(?:(?P<tax>\d{1,2})\s+)?"
-        r"(?P<amount>[\d,]+\.\d{2})",
+        r"(?P<amount>" + money + r")",
+        re.I,
+    )
+    # Qty MRP Disc% Tax% Amount (disc/tax may be int or xx.00)
+    mrp_row = re.compile(
+        r"(?P<part>[A-Z][A-Z0-9][A-Z0-9\-]{3,})\s+"
+        r"(?P<desc>.+?)\s+"
+        r"(?P<hsn>\d{4,8})\s+"
+        r"(?P<qty>\d+(?:[.,]\d+)?)\s*"
+        r"(?P<unit>NOS-?|Nos|PCS|SET|SETS|ROLL)?\s+"
+        r"(?P<mrp>" + money + r")\s+"
+        r"(?P<disc>\d{1,2}(?:\.\d{1,2})?)\s+"
+        r"(?P<tax>\d{1,2}(?:\.\d{1,2})?)\s+"
+        r"(?P<amount>" + money + r")",
+        re.I,
+    )
+    for raw in text.splitlines():
+        ln = _clean(raw)
+        if not ln or STOP_ITEM.search(ln):
+            continue
+        mm = mrp_row.search(ln)
+        if mm:
+            qty = mm.group("qty")
+            unit = (mm.group("unit") or "").rstrip("-")
+            mrp = mm.group("mrp")
+            amount = mm.group("amount")
+            rate = ""
+            try:
+                q = float(qty.replace(",", ""))
+                a = float(amount.replace(",", ""))
+                if q > 0:
+                    rate = f"{a / q:.2f}"
+            except Exception:
+                rate = ""
+            items.append(
+                {
+                    "part_number": mm.group("part"),
+                    "description": _clean(mm.group("desc")),
+                    "hsn_sac": mm.group("hsn"),
+                    "qty": f"{qty} {unit}".strip(),
+                    "mrp": mrp,
+                    "rate": rate or mrp,
+                    "amount": amount,
+                }
+            )
+            continue
+        m = row.search(ln)
+        if not m:
+            continue
+        unit = (m.group("unit") or "").rstrip("-")
+        moneys = re.findall(money, ln)
+        rate = m.group("rate")
+        amount = m.group("amount")
+        mrp = ""
+        # If OCR captured MRP + Disc% + Amount as three moneys, first is MRP
+        if len(moneys) >= 3:
+            try:
+                mid = float(moneys[-2].replace(",", ""))
+            except Exception:
+                mid = 999
+            # Middle value looks like a discount/tax percent, not a dealer rate
+            if mid <= 100 and float(moneys[-1].replace(",", "")) > mid:
+                mrp = moneys[0] if len(moneys) == 3 else moneys[-3]
+                amount = moneys[-1]
+                # Prefer amount/qty as net rate when disc sits between mrp and amount
+                try:
+                    q = float(m.group("qty").replace(",", ""))
+                    a = float(amount.replace(",", ""))
+                    rate = f"{a / q:.2f}" if q > 0 else (rate if rate != mrp else "")
+                except Exception:
+                    pass
+                if not mrp:
+                    mrp = moneys[0]
+        items.append(
+            {
+                "part_number": m.group("part"),
+                "description": _clean(m.group("desc")),
+                "hsn_sac": m.group("hsn"),
+                "qty": f"{m.group('qty')} {unit}".strip(),
+                "mrp": mrp,
+                "rate": rate,
+                "amount": amount,
+            }
+        )
+    return _dedupe_items(items)
+
+
+def parse_part_mrp_disc_tax_amount(text: str) -> list[dict[str, str]]:
+    """
+    Ashok Leyland retail / similar:
+      S.No PartNo Description HSN Qty MRP Dis% Tax% Amount
+    No Rate column — MRP is explicit; net unit rate ≈ Amount / Qty.
+    """
+    items: list[dict[str, str]] = []
+    money = r"[\d,]+\.\d{2}"
+    row = re.compile(
+        r"(?:(?P<sno>\d{1,3})\s+)?"
+        r"(?P<part>[A-Z0-9][A-Z0-9\-]{5,})\s+"
+        r"(?P<desc>.+?)\s+"
+        r"(?P<hsn>\d{4,8})\s+"
+        r"(?P<qty>\d+(?:[.,]\d+)?)\s*"
+        r"(?P<unit>NOS|Nos|PCS|SET)?\s*"
+        r"(?P<mrp>" + money + r")\s+"
+        r"(?P<disc>\d{1,2}(?:\.\d{1,2})?)\s+"
+        r"(?P<tax>\d{1,2}(?:\.\d{1,2})?)\s+"
+        r"(?P<amount>" + money + r")",
         re.I,
     )
     for raw in text.splitlines():
@@ -891,15 +1080,107 @@ def parse_part_hsn_qty_rate(text: str) -> list[dict[str, str]]:
         m = row.search(ln)
         if not m:
             continue
-        unit = (m.group("unit") or "").rstrip("-")
+        desc = _clean(m.group("desc"))
+        if len(re.sub(r"[^A-Za-z0-9]", "", desc)) < 2:
+            continue
+        qty = m.group("qty")
+        unit = (m.group("unit") or "").strip()
+        if re.fullmatch(r"\d{4,8}", qty) and not unit:
+            continue
+        mrp = m.group("mrp")
+        amount = m.group("amount")
+        rate = ""
+        try:
+            q = float(qty.replace(",", ""))
+            a = float(amount.replace(",", ""))
+            if q > 0:
+                rate = f"{a / q:.2f}"
+        except Exception:
+            rate = ""
         items.append(
             {
                 "part_number": m.group("part"),
-                "description": _clean(m.group("desc")),
+                "description": desc,
                 "hsn_sac": m.group("hsn"),
-                "qty": f"{m.group('qty')} {unit}".strip(),
-                "rate": m.group("rate"),
-                "amount": m.group("amount"),
+                "qty": f"{qty} {unit}".strip(),
+                "mrp": mrp,
+                "rate": rate or mrp,
+                "amount": amount,
+            }
+        )
+    return _dedupe_items(items)
+
+
+def parse_handwritten_rate_qty_amount(text: str) -> list[dict[str, str]]:
+    """
+    Sparse handwritten GST slips (e.g. Alagu Gear Rod Covers):
+      Description [HSN] Rate Qty Amount
+    Tolerates integer amounts and mild OCR noise on qty (Sa0 → 500).
+    """
+    items: list[dict[str, str]] = []
+    num = r"[\d,]+\.?\d*"
+    row = re.compile(
+        r"(?:(?P<sno>\d{1,3})[\)\.\s]+)?(?P<desc>(?:\d{1,2}\s*/\s*\d{1,2}\s+)?"
+        r"(?:\d{1,2}\s+)?[A-Za-z][A-Za-z0-9 \/&\-]{2,40}?)\s+"
+        r"(?:(?P<hsn>\d{4,8})\s+)?"
+        r"(?P<rate>" + num + r")\s+"
+        r"(?P<qty>" + num + r"|[Ss5][a-z0-9]{0,3}|le[o0]|l00|1oo)\s+"
+        r"(?P<amount>" + num + r")\b",
+        re.I,
+    )
+    for raw in text.splitlines():
+        ln = _clean(raw)
+        if not ln or STOP_ITEM.search(ln):
+            continue
+        if not re.search(r"(?i)[A-Za-z]{3,}", ln):
+            continue
+        # Skip pure bank / header lines
+        if re.search(r"(?i)\b(gstin|ifsc|bank|branch|a/?c\s*no)\b", ln):
+            continue
+        m = row.search(ln)
+        if not m:
+            continue
+        desc = _clean(m.group("desc"))
+        desc = re.sub(r"^\d{1,3}[\)\.\s]+", "", desc)
+        if len(re.sub(r"[^A-Za-z]", "", desc)) < 3:
+            continue
+        rate = _fix_money(m.group("rate").replace(",", ""))
+        qty_raw = m.group("qty")
+        # OCR: Sa0 / sm0 / S00 → 500-ish handwritten 500
+        if re.fullmatch(r"(?i)[Ss5][a-z0o]*", qty_raw) or re.fullmatch(r"(?i)s\w?0", qty_raw):
+            qty_raw = "500"
+        elif re.fullmatch(r"(?i)le[o0]|l00|1oo", qty_raw):
+            qty_raw = "100"
+        qty_raw = re.sub(r"[^\d.]", "", qty_raw) or qty_raw
+        amount = _fix_money(str(m.group("amount")).replace(",", ""))
+        # Amounts on these slips are usually whole rupees ≥ 100
+        try:
+            r = float(rate)
+            q = float(qty_raw)
+            a = float(amount)
+        except Exception:
+            continue
+        if r <= 0 or q <= 0 or a < 50:
+            continue
+        # Prefer exact qty*rate≈amount; allow rate±1 OCR drift
+        if abs(q * r - a) > 0.51:
+            if abs(q * (r - 1) - a) <= 0.51:
+                r = r - 1
+            elif abs(q * (r + 1) - a) <= 0.51:
+                r = r + 1
+            elif abs(q * r - a) > max(250.0, 0.08 * a):
+                continue
+            rate = str(int(r)) if r == int(r) else f"{r:.2f}"
+        hsn = m.group("hsn") or ""
+        items.append(
+            {
+                "part_number": "",
+                "description": desc[:80],
+                "hsn_sac": hsn,
+                "qty": str(int(q)) if q == int(q) else str(q),
+                "mrp": "",
+                "rate": f"{r:.2f}" if ("." in rate or r != int(r)) else str(int(r)),
+                "amount": f"{a:.2f}" if a != int(a) else str(int(a)),
             }
         )
     return _dedupe_items(items)
@@ -1010,7 +1291,7 @@ def parse_einvoice_line_items(text: str) -> list[dict[str, str]]:
 
 
 def _item_score(items: list[dict[str, str]]) -> int:
-    """Prefer complete rows (desc/part + qty + rate + amount)."""
+    """Prefer complete rows (desc/part + qty + rate/mrp + amount)."""
     score = 0
     for it in items:
         if not (it.get("description") or it.get("part_number")):
@@ -1019,6 +1300,8 @@ def _item_score(items: list[dict[str, str]]) -> int:
         if it.get("qty"):
             score += 1
         if it.get("rate"):
+            score += 1
+        if it.get("mrp"):
             score += 1
         if it.get("amount"):
             score += 2
@@ -1290,6 +1573,7 @@ def parse_mrp_rate_items(text: str) -> list[dict[str, str]]:
     """
     Common spare-parts layout with MRP column:
       Desc HSN Qty MRP Rate [Disc] Amount
+      OR Qty MRP Dis% Tax% Amount (no dealer rate — Ashok-style)
       OR Qty MRP Amount (rate blank — use MRP as selling reference)
     """
     items: list[dict[str, str]] = []
@@ -1301,16 +1585,17 @@ def parse_mrp_rate_items(text: str) -> list[dict[str, str]]:
         r"(?P<unit>NOS|Nos|PCS|SET|PKT|PKTS)?\s+"
         r"(?P<mrp>" + money + r")\s+"
         r"(?:(?P<rate>" + money + r")\s+)?"
-        r"(?:(?P<disc>\d{1,2})\s*%?\s+)?"
+        r"(?:(?P<disc>\d{1,2}(?:\.\d{1,2})?)\s*%?\s+)?"
+        r"(?:(?P<tax>\d{1,2}(?:\.\d{1,2})?)\s+%?\s+)?"
         r"(?P<amount>" + money + r")",
         re.I,
     )
+    has_mrp_header = bool(re.search(r"(?i)\bmrp\b", text[:1200]))
     for raw in text.splitlines():
         ln = _clean(raw)
         if not ln or STOP_ITEM.search(ln):
             continue
-        if not re.search(r"(?i)mrp", text[:800]) and not re.search(rf"{money}\s+{money}\s+{money}", ln):
-            # Still allow rows with 3 money values (mrp/rate/amount) without header
+        if not has_mrp_header and not re.search(rf"{money}\s+{money}", ln):
             if len(re.findall(money, ln)) < 2:
                 continue
         m = row.search(ln)
@@ -1325,17 +1610,53 @@ def parse_mrp_rate_items(text: str) -> list[dict[str, str]]:
         mrp = m.group("mrp")
         rate = m.group("rate") or ""
         amount = m.group("amount")
-        # If only two moneys matched as mrp+amount, rate empty — keep MRP separate
-        moneys = re.findall(money, ln)
+        # Only treat money tokens AFTER the HSN/qty block — decimals in part
+        # descriptions (e.g. CMP-6.17R) must not become MRP.
+        after = ln
+        if m.group("hsn"):
+            after = ln[m.start("qty") :] if m.start("qty") >= 0 else ln[m.end("hsn") :]
+        elif m.start("qty") >= 0:
+            after = ln[m.start("qty") :]
+        moneys = re.findall(money, after)
+        # Ashok: MRP Disc% Tax% Amount → moneys like 364.00, 30.00, 18.00?, 509.60
         if len(moneys) >= 3:
-            mrp, rate, amount = moneys[-3], moneys[-2], moneys[-1]
+            try:
+                cand_mids = [float(x.replace(",", "")) for x in moneys[1:-1]]
+            except Exception:
+                cand_mids = []
+            if cand_mids and all(v <= 100 for v in cand_mids):
+                mrp, amount = moneys[0], moneys[-1]
+                rate = ""
+            elif len(moneys) >= 3 and not has_mrp_header:
+                mrp, rate, amount = moneys[-3], moneys[-2], moneys[-1]
+            else:
+                # Header says MRP: first money after qty is MRP; last is amount
+                mrp, amount = moneys[0], moneys[-1]
+                if len(moneys) >= 3:
+                    mid = float(moneys[1].replace(",", ""))
+                    # Second money is dealer rate only if it doesn't look like a %
+                    rate = moneys[1] if mid > 100 else ""
+                else:
+                    rate = ""
         elif len(moneys) == 2:
             mrp, amount = moneys[0], moneys[1]
             rate = ""
+        elif len(moneys) == 1:
+            amount = moneys[0]
+            mrp = mrp if mrp in moneys else ""
+            rate = rate if rate else ""
         unit = (m.group("unit") or "").strip()
         qty = m.group("qty")
         if re.fullmatch(r"\d{4,8}", qty) and not unit:
             continue
+        if not rate:
+            try:
+                q = float(qty.replace(",", ""))
+                a = float(amount.replace(",", ""))
+                if q > 0:
+                    rate = f"{a / q:.2f}"
+            except Exception:
+                rate = mrp
         items.append(
             {
                 "part_number": part,
@@ -1343,7 +1664,7 @@ def parse_mrp_rate_items(text: str) -> list[dict[str, str]]:
                 "hsn_sac": m.group("hsn") or "",
                 "qty": f"{qty} {unit}".strip(),
                 "mrp": mrp,
-                "rate": rate or mrp,  # Excel Rate falls back to MRP when dealer rate missing
+                "rate": rate or mrp,
                 "amount": amount,
             }
         )
@@ -1356,10 +1677,12 @@ def parse_line_items(text: str) -> list[dict[str, str]]:
     Not tied to any one supplier — covers digital e-invoices, Tally scans, and photos.
     """
     candidates = [
+        parse_part_mrp_disc_tax_amount(text),
         parse_s_code_nos_items(text),
         parse_einvoice_line_items(text),
         parse_mrp_rate_items(text),
         parse_part_hsn_qty_rate(text),
+        parse_handwritten_rate_qty_amount(text),
         parse_credit_bill_hsn_rate_qty(text),
         parse_photo_gstr_qty_rate(text),
         parse_tally_scan_items(text, hsn_digits=8),
@@ -1367,9 +1690,56 @@ def parse_line_items(text: str) -> list[dict[str, str]]:
         parse_part_column_items(text),
         parse_amount_trail_items(text),
     ]
-    best = max(candidates, key=_item_score)
-    if _item_score(best) > 0:
-        return _normalize_shifted_hsn(best)
+
+    def _quality(items: list[dict[str, str]]) -> tuple:
+        # Prefer rows with real descriptions / part numbers; penalize OCR junk
+        usable = []
+        for it in items:
+            desc = re.sub(r"[^A-Za-z]", "", str(it.get("description") or ""))
+            part = str(it.get("part_number") or "")
+            if len(desc) < 3 and len(part) < 4:
+                continue
+            try:
+                rate_v = float(str(it.get("rate") or "0").replace(",", ""))
+            except Exception:
+                rate_v = 0
+            if rate_v <= 0 and not it.get("mrp"):
+                continue
+            # Qty accidentally set to MRP (e.g. "2520 Nos") with tiny rate
+            qty_tok = str(it.get("qty") or "").split()[0].replace(",", "")
+            try:
+                qty_v = float(qty_tok)
+            except Exception:
+                qty_v = 0
+            if qty_v >= 100 and rate_v < 1:
+                continue
+            usable.append(it)
+        return (_item_score(usable), len(usable), _item_score(items))
+
+    best = max(candidates, key=_quality)
+    # Drop junk rows from the winning set
+    cleaned = []
+    for it in best:
+        desc = re.sub(r"[^A-Za-z]", "", str(it.get("description") or ""))
+        part = str(it.get("part_number") or "")
+        if len(desc) < 3 and len(part) < 4:
+            continue
+        try:
+            rate_v = float(str(it.get("rate") or "0").replace(",", ""))
+        except Exception:
+            rate_v = 0
+        if rate_v <= 0 and not it.get("mrp"):
+            continue
+        qty_tok = str(it.get("qty") or "").split()[0].replace(",", "")
+        try:
+            qty_v = float(qty_tok)
+        except Exception:
+            qty_v = 0
+        if qty_v >= 100 and rate_v < 1:
+            continue
+        cleaned.append(it)
+    if _item_score(cleaned) > 0:
+        return _normalize_shifted_hsn(cleaned)
     return []
 
 

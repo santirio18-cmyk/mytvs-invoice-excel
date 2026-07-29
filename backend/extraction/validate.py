@@ -21,7 +21,7 @@ def find_taxable_total(text: str, item_sum: float | None = None) -> float | None
     taxable_labeled: list[float] = []
     subtotal_labeled: list[float] = []
     for m in re.finditer(
-        r"(?i)(taxable\s*(?:value|amt|amount)?|sub\s*total|total\s*(?:amount)?|g\.?\s*total|grand\s*total)"
+        r"(?i)(taxable\s*(?:value|amt|amount)?|sub\s*total|total\s*(?:amount)?|g\.?\s*total|grand\s*total|net\s*amount)"
         r"\s*[:\-]?\s*([\d,]+\.\d{2})",
         text or "",
     ):
@@ -33,6 +33,9 @@ def find_taxable_total(text: str, item_sum: float | None = None) -> float | None
             taxable_labeled.append(v)
         elif "grand" in label or "g." in label or "g total" in label:
             continue  # skip GST-inclusive grand total
+        elif "net" in label:
+            # Net amount is GST-inclusive — still useful as an upper bound later
+            subtotal_labeled.append(v)
         else:
             subtotal_labeled.append(v)
 
@@ -94,6 +97,18 @@ def validate_invoice(inv: dict[str, Any], text: str = "") -> dict[str, Any]:
                 f"(₹{diff:+.2f}). Check missing/extra rows."
             )
             score -= 0.1
+            # Low-res screenshots often invent a few wrong rows — drop them
+            # when the sum is nowhere near the invoice total.
+            if taxable >= 500 and item_sum < taxable * 0.25:
+                warnings.append(
+                    "Line items cleared — OCR totals were unreliable. "
+                    "Re-upload a clearer PDF/photo (or enable OpenAI on the server)."
+                )
+                items = []
+                inv = dict(inv)
+                inv["line_items"] = items
+                item_sum = 0.0
+                score = min(score, 0.4)
 
     missing_amt = sum(1 for it in items if not _money(it.get("amount")))
     if missing_amt:

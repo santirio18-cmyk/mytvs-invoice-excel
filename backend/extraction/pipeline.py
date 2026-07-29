@@ -47,6 +47,8 @@ def _score_items(items: list[dict[str, str]]) -> int:
             score += 1
         if it.get("rate"):
             score += 1
+        if it.get("mrp"):
+            score += 1
         if it.get("amount"):
             score += 2
         if it.get("part_number"):
