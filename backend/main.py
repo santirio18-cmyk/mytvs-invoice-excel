@@ -1252,13 +1252,13 @@ def _clone_item_to_match_subtotal(items: list[dict[str, str]], text: str) -> lis
             candidates.append(float(m.group(1).replace(",", "")))
         except Exception:
             pass
-    # Also common bare totals like 2,644.54 near the foot of Tally invoices
-    for m in re.finditer(r"\b(\d{1,3},\d{3}\.\d{2})\b", text):
+    # Also common bare totals like 2,644.54 / 2644.54 near the foot of Tally invoices
+    for m in re.finditer(r"\b(\d{1,3},\d{3}\.\d{2}|\d{4,6}\.\d{2})\b", text):
         try:
             val = float(m.group(1).replace(",", ""))
         except Exception:
             continue
-        if 100 <= val <= 500000:
+        if 500 <= val <= 500000:
             candidates.append(val)
     for total in candidates:
         diff = round(total - item_sum, 2)
