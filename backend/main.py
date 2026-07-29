@@ -36,7 +36,7 @@ CORS_ORIGINS = [o.strip() for o in _cors.split(",") if o.strip()] or ["*"]
 
 app = FastAPI(title="myTVS — Invoice to Excel", version="1.4.0")
 
-DEPLOY_MARK = "2026-07-29-vinayaka11-dup"
+DEPLOY_MARK = "2026-07-29-vinayaka11-sub"
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -1228,8 +1228,50 @@ def parse_s_code_nos_items(text: str) -> list[dict[str, str]]:
             if need > 0 and have:
                 for _ in range(need):
                     out.append(dict(have[0]))
+
+        # Subtotal repair: if printed taxable/subtotal is ~one line amount higher, clone that line
+        out = _clone_item_to_match_subtotal(out, text)
         return out
     return _dedupe_items(no_sl + list(by_sl.values()))
+
+
+def _clone_item_to_match_subtotal(items: list[dict[str, str]], text: str) -> list[dict[str, str]]:
+    """If OCR dropped a duplicate row, taxable total is often short by exactly that amount."""
+    if not items:
+        return items
+    try:
+        item_sum = sum(float(str(it.get("amount") or "0").replace(",", "")) for it in items)
+    except Exception:
+        return items
+    candidates: list[float] = []
+    for m in re.finditer(
+        r"(?i)(?:taxable\s*value|sub\s*total|total\s*(?:amount)?)\s*[:\-]?\s*([\d,]+\.\d{2})",
+        text,
+    ):
+        try:
+            candidates.append(float(m.group(1).replace(",", "")))
+        except Exception:
+            pass
+    # Also common bare totals like 2,644.54 near the foot of Tally invoices
+    for m in re.finditer(r"\b(\d{1,3},\d{3}\.\d{2})\b", text):
+        try:
+            val = float(m.group(1).replace(",", ""))
+        except Exception:
+            continue
+        if 100 <= val <= 500000:
+            candidates.append(val)
+    for total in candidates:
+        diff = round(total - item_sum, 2)
+        if diff <= 0.05:
+            continue
+        for it in items:
+            try:
+                amt = float(str(it.get("amount") or "0").replace(",", ""))
+            except Exception:
+                continue
+            if abs(amt - diff) <= 0.05:
+                return items + [dict(it)]
+    return items
 
 
 def parse_line_items(text: str) -> list[dict[str, str]]:
