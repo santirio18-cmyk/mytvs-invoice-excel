@@ -36,7 +36,7 @@ CORS_ORIGINS = [o.strip() for o in _cors.split(",") if o.strip()] or ["*"]
 
 app = FastAPI(title="myTVS — Invoice to Excel", version="1.4.0")
 
-DEPLOY_MARK = "2026-07-28-vinayaka11"
+DEPLOY_MARK = "2026-07-29-vinayaka11-ocr"
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -98,20 +98,23 @@ def preprocess(img: Image.Image) -> Image.Image:
 
 def ocr_image(img: Image.Image) -> str:
     prepared = preprocess(img)
-    # Full page — PSM 4 works best on many invoice photos; PSM 6 recovers denser tables
+    # Full page — PSM 4 + 6
     full = pytesseract.image_to_string(prepared, lang="eng", config="--oem 3 --psm 4")
     full6 = pytesseract.image_to_string(prepared, lang="eng", config="--oem 3 --psm 6")
 
-    # Extra pass on top-right (invoice no / date often lives there and gets clipped in photos)
     w, h = prepared.size
     top_right = prepared.crop((int(w * 0.42), 0, w, int(h * 0.28)))
     tr = pytesseract.image_to_string(top_right, lang="eng", config="--oem 3 --psm 6")
 
-    # Mid table band — helps recover part numbers on photo invoices
+    # Mid table — proven on phone photos (Autolight-style)
     mid = prepared.crop((0, int(h * 0.35), w, int(h * 0.72)))
     mid_txt = pytesseract.image_to_string(mid, lang="eng", config="--oem 3 --psm 6")
 
-    return "\n".join([full, full6, tr, mid_txt])
+    # Lower table — last line items often missed by mid crop (Vinayaka row 10–11)
+    lower = prepared.crop((0, int(h * 0.52), w, int(h * 0.90)))
+    lower_txt = pytesseract.image_to_string(lower, lang="eng", config="--oem 3 --psm 6")
+
+    return "\n".join([full, full6, tr, mid_txt, lower_txt])
 
 
 def extract_text_from_pdf(data: bytes) -> str:
@@ -1171,7 +1174,43 @@ def parse_s_code_nos_items(text: str) -> list[dict[str, str]]:
         no_sl.append(item)
 
     if len(by_sl) >= 3:
-        return [by_sl[k] for k in sorted(by_sl)]
+        # Fill missing SI Nos (e.g. duplicate SKU rows OCR'd without a clear serial once)
+        max_sl = max(by_sl)
+        gaps = [i for i in range(1, max_sl + 1) if i not in by_sl]
+        pool = list(no_sl)
+        for gap in gaps:
+            prev = by_sl.get(gap - 1)
+            nxt = by_sl.get(gap + 1)
+            picked_idx = None
+            for i, cand in enumerate(pool):
+                if prev and cand["part_number"] == prev["part_number"] and cand["amount"] == prev["amount"]:
+                    picked_idx = i
+                    break
+                if nxt and cand["part_number"] == nxt["part_number"] and cand["amount"] == nxt["amount"]:
+                    picked_idx = i
+                    break
+            if picked_idx is None:
+                present = {(v["part_number"], v["amount"], v["qty"]) for v in by_sl.values()}
+                for i, cand in enumerate(pool):
+                    key = (cand["part_number"], cand["amount"], cand["qty"])
+                    if key not in present:
+                        picked_idx = i
+                        break
+            if picked_idx is not None:
+                by_sl[gap] = pool.pop(picked_idx)
+
+        # Append trailing rows OCR captured without SI No (often last LED / accessory lines)
+        present_amts = {v["amount"] for v in by_sl.values()}
+        present_parts = {v["part_number"] for v in by_sl.values()}
+        extras: list[dict[str, str]] = []
+        for cand in pool:
+            if cand["amount"] not in present_amts or cand["part_number"] not in present_parts:
+                extras.append(cand)
+                present_amts.add(cand["amount"])
+                present_parts.add(cand["part_number"])
+        out = [by_sl[k] for k in sorted(by_sl)]
+        out.extend(extras)
+        return out
     return _dedupe_items(no_sl + list(by_sl.values()))
 
 
