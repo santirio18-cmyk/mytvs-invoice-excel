@@ -36,7 +36,7 @@ CORS_ORIGINS = [o.strip() for o in _cors.split(",") if o.strip()] or ["*"]
 
 app = FastAPI(title="myTVS — Invoice to Excel", version="1.4.0")
 
-DEPLOY_MARK = "2026-07-29-vinayaka11-sub"
+DEPLOY_MARK = "2026-07-29-vinayaka11-keepdup"
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -1332,15 +1332,19 @@ def merge_by_invoice(invoices: list[dict[str, Any]]) -> list[dict[str, Any]]:
             for field in ("supplier_name", "date", "place_of_supply", "invoice_number"):
                 if base.get(field) in (None, "", "Unknown") and p.get(field) not in (None, "", "Unknown"):
                     base[field] = p[field]
-        # dedupe items across pages
-        seen = set()
-        unique_items = []
-        for it in items:
-            sig = (it.get("part_number"), it.get("description"), it.get("qty"), it.get("amount"))
-            if sig in seen:
-                continue
-            seen.add(sig)
-            unique_items.append(it)
+        # Dedupe only when stitching multiple pages/files of the same invoice.
+        # A single page may intentionally list the same SKU twice — keep those rows.
+        if len(pages) == 1:
+            unique_items = items
+        else:
+            seen = set()
+            unique_items = []
+            for it in items:
+                sig = (it.get("part_number"), it.get("description"), it.get("qty"), it.get("amount"))
+                if sig in seen:
+                    continue
+                seen.add(sig)
+                unique_items.append(it)
         base["line_items"] = unique_items
         base["filename"] = " + ".join(dict.fromkeys(files))
         merged.append(base)
