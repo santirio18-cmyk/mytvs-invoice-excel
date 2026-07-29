@@ -176,29 +176,53 @@ export default function Home() {
 
       const totalItems = invoices.reduce((n, inv) => n + (inv.item_count || 0), 0);
 
-      // One download only: ZIP contains Excel (.xlsx) + CSV
-      const formZip = new FormData();
-      files.forEach((f) => formZip.append("files", f));
-      const zipRes = await fetch(`${API_BASE}/api/convert`, { method: "POST", body: formZip });
-      if (!zipRes.ok) throw new Error("Download failed.");
-      const zipBlob = await zipRes.blob();
-      if (zipBlob.size < 20) throw new Error("Download came back empty — is backend running?");
-      const zipName =
-        (zipRes.headers.get("Content-Disposition") || "").match(/filename="?([^"]+)"?/)?.[1] ||
-        "invoices.zip";
-      const nextZipUrl = triggerDownload(zipBlob, zipName);
-      setZipUrl(nextZipUrl);
-      setCsvUrl(null);
+      // Default: CSV only. Excel is optional via a separate button.
+      const formCsv = new FormData();
+      files.forEach((f) => formCsv.append("files", f));
+      const csvRes = await fetch(`${API_BASE}/api/convert-csv`, { method: "POST", body: formCsv });
+      if (!csvRes.ok) throw new Error("CSV download failed.");
+      const csvBlob = await csvRes.blob();
+      if (csvBlob.size < 20) throw new Error("CSV came back empty — is backend running?");
+      const csvName =
+        (csvRes.headers.get("Content-Disposition") || "").match(/filename="?([^"]+)"?/)?.[1] ||
+        "invoices.csv";
+      const nextCsvUrl = triggerDownload(csvBlob, csvName);
+      setCsvUrl(nextCsvUrl);
+      setZipUrl(null);
 
       setStatus(totalItems ? "done" : "error");
       setMessage(
         totalItems
-          ? `Success: ${invoices.length} invoice(s), ${totalItems} line item(s). Downloaded ZIP (Excel + CSV).`
+          ? `Success: ${invoices.length} invoice(s), ${totalItems} line item(s). CSV downloaded.`
           : `Headers found but 0 line items. Open preview below.`,
       );
     } catch (err) {
       setStatus("error");
       setMessage(err instanceof Error ? err.message : "Something went wrong.");
+    }
+  };
+
+  const downloadExcel = async () => {
+    if (!files.length) return;
+    setMessage("Preparing Excel…");
+    try {
+      const form = new FormData();
+      files.forEach((f) => form.append("files", f));
+      const res = await fetch(`${API_BASE}/api/convert-xlsx`, { method: "POST", body: form });
+      if (!res.ok) throw new Error("Excel download failed.");
+      const blob = await res.blob();
+      if (blob.size < 20) throw new Error("Excel came back empty.");
+      const name =
+        (res.headers.get("Content-Disposition") || "").match(/filename="?([^"]+)"?/)?.[1] ||
+        "invoices.xlsx";
+      if (zipUrl) URL.revokeObjectURL(zipUrl);
+      setZipUrl(triggerDownload(blob, name));
+      setMessage((prev) =>
+        prev.includes("Excel") ? prev : `${prev} Excel downloaded.`.replace(/\.\s*$/, ". "),
+      );
+    } catch (err) {
+      setStatus("error");
+      setMessage(err instanceof Error ? err.message : "Excel download failed.");
     }
   };
 
@@ -215,7 +239,7 @@ export default function Home() {
             <MyTvsLogo className="text-[2.5rem] sm:text-5xl lg:text-6xl" />
           </div>
           <p className="max-w-xl text-sm font-medium leading-relaxed text-ink-soft sm:text-base">
-            Invoice PDFs &amp; photos → Excel. Part number, HSN/SAC, qty, rate, and amount on every line.
+            Invoice PDFs &amp; photos → CSV. Part number, HSN/SAC, qty, MRP, rate, and amount on every line.
           </p>
         </header>
 
@@ -318,17 +342,35 @@ export default function Home() {
                       Converting…
                     </>
                   ) : (
-                    "Generate Excel"
+                    "Generate CSV"
                   )}
                 </button>
 
+                {csvUrl && (
+                  <a
+                    href={csvUrl}
+                    download="invoices.csv"
+                    className="inline-flex items-center justify-center bg-tvs-orange px-6 py-3.5 text-sm font-bold tracking-wide text-white transition hover:bg-tvs-orange-deep"
+                  >
+                    Download CSV again
+                  </a>
+                )}
+                {status === "done" && files.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={downloadExcel}
+                    className="inline-flex items-center justify-center border border-tvs-blue px-6 py-3.5 text-sm font-bold tracking-wide text-tvs-blue transition hover:bg-tvs-blue hover:text-white"
+                  >
+                    Download Excel (optional)
+                  </button>
+                )}
                 {zipUrl && (
                   <a
                     href={zipUrl}
-                    download="invoices.zip"
-                    className="inline-flex items-center justify-center bg-tvs-orange px-6 py-3.5 text-sm font-bold tracking-wide text-white transition hover:bg-tvs-orange-deep"
+                    download="invoices.xlsx"
+                    className="inline-flex items-center justify-center border border-tvs-blue/40 px-5 py-3.5 text-sm font-semibold tracking-wide text-tvs-blue transition hover:bg-tvs-blue/5"
                   >
-                    Download ZIP again
+                    Excel again
                   </a>
                 )}
               </div>

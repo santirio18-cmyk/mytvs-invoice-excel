@@ -36,7 +36,7 @@ CORS_ORIGINS = [o.strip() for o in _cors.split(",") if o.strip()] or ["*"]
 
 app = FastAPI(title="myTVS — Invoice to Excel", version="2.0.0")
 
-DEPLOY_MARK = "2026-07-29-qty-mrp-fix"
+DEPLOY_MARK = "2026-07-29-csv-default"
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -2166,3 +2166,26 @@ async def convert_csv(files: list[UploadFile] = File(...)) -> Response:
     if errors:
         headers["X-Partial-Errors"] = "; ".join(errors)[:500]
     return Response(content=csv_bytes, media_type="text/csv; charset=utf-8", headers=headers)
+
+
+@app.post("/api/convert-xlsx")
+async def convert_xlsx(files: list[UploadFile] = File(...)) -> Response:
+    """Optional Excel-only download (one sheet per invoice)."""
+    invoices, errors = await _load_invoices(files)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_outputs(invoices, stamp)
+    xlsx = build_workbook(invoices)
+    headers = {
+        "Content-Disposition": f'attachment; filename="invoices_{stamp}.xlsx"',
+        "Content-Length": str(len(xlsx)),
+        "X-Processed-Count": str(len(invoices)),
+        "X-Item-Count": str(sum(len(i.get("line_items") or []) for i in invoices)),
+        "Access-Control-Expose-Headers": "Content-Disposition, X-Processed-Count, X-Item-Count, X-Partial-Errors",
+    }
+    if errors:
+        headers["X-Partial-Errors"] = "; ".join(errors)[:500]
+    return Response(
+        content=xlsx,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers=headers,
+    )
