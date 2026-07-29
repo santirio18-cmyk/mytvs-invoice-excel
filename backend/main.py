@@ -36,7 +36,7 @@ CORS_ORIGINS = [o.strip() for o in _cors.split(",") if o.strip()] or ["*"]
 
 app = FastAPI(title="myTVS — Invoice to Excel", version="1.4.0")
 
-DEPLOY_MARK = "2026-07-29-v11-and"
+DEPLOY_MARK = "2026-07-29-v11-bysl"
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -1210,10 +1210,7 @@ def parse_s_code_nos_items(text: str) -> list[dict[str, str]]:
                 present_amts.add(cand["amount"])
                 present_parts.add(cand["part_number"])
         out = [by_sl[k] for k in sorted(by_sl)]
-        out.extend(extras)
-
-        # Fill at most one missing small duplicate row using printed taxable total
-        out = _clone_item_to_match_subtotal(out, text)
+        # Do not append extras / subtotal clones — they over-duplicated rows on Railway OCR
         return out
     return _dedupe_items(no_sl + list(by_sl.values()))
 
