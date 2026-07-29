@@ -36,7 +36,7 @@ CORS_ORIGINS = [o.strip() for o in _cors.split(",") if o.strip()] or ["*"]
 
 app = FastAPI(title="myTVS — Invoice to Excel", version="1.4.0")
 
-DEPLOY_MARK = "2026-07-29-v11-bysl"
+DEPLOY_MARK = "2026-07-29-v11-ghost"
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -1169,13 +1169,43 @@ def parse_s_code_nos_items(text: str) -> list[dict[str, str]]:
             if 1 <= sl <= 80:
                 prev = by_sl.get(sl)
                 if not prev or _quality(item) >= _quality(prev):
+                    twins = [
+                        s
+                        for s, existing in by_sl.items()
+                        if s != sl
+                        and existing.get("part_number") == item["part_number"]
+                        and existing.get("amount") == item["amount"]
+                    ]
+                    # True duplicate SKUs are consecutive (5+6). Ghost OCR rows are not.
+                    if twins and all(abs(s - sl) > 1 for s in twins):
+                        continue
                     by_sl[sl] = item
                 continue
         no_sl.append(item)
 
     if len(by_sl) >= 3:
-        # Fill missing SI Nos (e.g. duplicate SKU rows OCR'd without a clear serial once)
+        # Drop trailing ghost SI Nos (e.g. 12 repeating line 1) before gap-fill
+        keys = sorted(by_sl)
+        while len(keys) >= 2:
+            hi = keys[-1]
+            lo_matches = [
+                k
+                for k in keys[:-1]
+                if by_sl[k].get("part_number") == by_sl[hi].get("part_number")
+                and by_sl[k].get("amount") == by_sl[hi].get("amount")
+                and abs(k - hi) > 1
+            ]
+            if lo_matches:
+                by_sl.pop(hi)
+                keys = sorted(by_sl)
+                continue
+            break
+
         max_sl = max(by_sl)
+        # Don't gap-fill across huge holes from a single bad high SI
+        if max_sl - len(by_sl) > 3:
+            max_sl = max(k for k in by_sl if k <= len(by_sl) + 2) if by_sl else max_sl
+
         gaps = [i for i in range(1, max_sl + 1) if i not in by_sl]
         pool = list(no_sl)
         for gap in gaps:
@@ -1189,29 +1219,10 @@ def parse_s_code_nos_items(text: str) -> list[dict[str, str]]:
                 if nxt and cand["part_number"] == nxt["part_number"] and cand["amount"] == nxt["amount"]:
                     picked_idx = i
                     break
-            if picked_idx is None:
-                present = {(v["part_number"], v["amount"], v["qty"]) for v in by_sl.values()}
-                for i, cand in enumerate(pool):
-                    key = (cand["part_number"], cand["amount"], cand["qty"])
-                    if key not in present:
-                        picked_idx = i
-                        break
             if picked_idx is not None:
                 by_sl[gap] = pool.pop(picked_idx)
 
-        # Append trailing rows OCR captured without SI No (often last LED / accessory lines)
-        present_amts = {v["amount"] for v in by_sl.values()}
-        present_parts = {v["part_number"] for v in by_sl.values()}
-        extras: list[dict[str, str]] = []
-        for cand in pool:
-            # Only append rows that are new on BOTH part and amount (trailing lines)
-            if cand["amount"] not in present_amts and cand["part_number"] not in present_parts:
-                extras.append(cand)
-                present_amts.add(cand["amount"])
-                present_parts.add(cand["part_number"])
-        out = [by_sl[k] for k in sorted(by_sl)]
-        # Do not append extras / subtotal clones — they over-duplicated rows on Railway OCR
-        return out
+        return [by_sl[k] for k in sorted(by_sl)]
     return _dedupe_items(no_sl + list(by_sl.values()))
 
 
