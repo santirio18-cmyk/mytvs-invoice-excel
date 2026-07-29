@@ -36,7 +36,7 @@ CORS_ORIGINS = [o.strip() for o in _cors.split(",") if o.strip()] or ["*"]
 
 app = FastAPI(title="myTVS — Invoice to Excel", version="1.4.0")
 
-DEPLOY_MARK = "2026-07-29-vinayaka11-final"
+DEPLOY_MARK = "2026-07-29-vinayaka-11ok"
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -1229,8 +1229,15 @@ def parse_s_code_nos_items(text: str) -> list[dict[str, str]]:
                 for _ in range(need):
                     out.append(dict(have[0]))
 
-        # Subtotal repair: if printed taxable/subtotal is ~one line amount higher, clone that line
-        out = _clone_item_to_match_subtotal(out, text)
+        # Subtotal repair only when short of the highest SI No seen
+        max_sl = max(by_sl)
+        if len(out) < max_sl:
+            out = _clone_item_to_match_subtotal(out, text)
+        elif len(out) == max_sl:
+            # Still allow one repair if totals clearly short (duplicate under same SI OCR miss)
+            repaired = _clone_item_to_match_subtotal(out, text)
+            if len(repaired) == len(out) + 1:
+                out = repaired
         return out
     return _dedupe_items(no_sl + list(by_sl.values()))
 
@@ -1243,34 +1250,49 @@ def _clone_item_to_match_subtotal(items: list[dict[str, str]], text: str) -> lis
         item_sum = sum(float(str(it.get("amount") or "0").replace(",", "")) for it in items)
     except Exception:
         return items
+
+    # Prefer labeled taxable / subtotal only — bare amounts over-match and double-clone
     candidates: list[float] = []
     for m in re.finditer(
-        r"(?i)(?:taxable\s*value|sub\s*total|total\s*(?:amount)?)\s*[:\-]?\s*([\d,]+\.\d{2})",
+        r"(?i)(?:taxable\s*(?:value|amt|amount)?|sub\s*total|total\s*(?:amount)?)\s*[:\-]?\s*([\d,]+\.\d{2})",
         text,
     ):
         try:
             candidates.append(float(m.group(1).replace(",", "")))
         except Exception:
             pass
-    # Also common bare totals like 2,644.54 / 2644.54 near the foot of Tally invoices
-    for m in re.finditer(r"\b(\d{1,3},\d{3}\.\d{2}|\d{4,6}\.\d{2})\b", text):
-        try:
-            val = float(m.group(1).replace(",", ""))
-        except Exception:
-            continue
-        if 500 <= val <= 500000:
-            candidates.append(val)
+    # Amount alone on a line (Tally often prints 2,644.54 by itself)
+    for raw in text.splitlines():
+        ln = _clean(raw)
+        if re.fullmatch(r"[\d,]+\.\d{2}", ln):
+            try:
+                val = float(ln.replace(",", ""))
+            except Exception:
+                continue
+            if 500 <= val <= 500000:
+                candidates.append(val)
+
+    # Already reconciled to a candidate total — do nothing
     for total in candidates:
+        if abs(total - item_sum) <= 0.06:
+            return items
+
+    for total in sorted(set(candidates)):
         diff = round(total - item_sum, 2)
         if diff <= 0.05:
             continue
+        # Prefer cloning the smallest matching line (duplicate cable rows, not the header SKU)
+        matches = []
         for it in items:
             try:
                 amt = float(str(it.get("amount") or "0").replace(",", ""))
             except Exception:
                 continue
             if abs(amt - diff) <= 0.05:
-                return items + [dict(it)]
+                matches.append(it)
+        if matches:
+            matches.sort(key=lambda x: float(str(x.get("amount") or "0").replace(",", "")))
+            return items + [dict(matches[0])]
     return items
 
 
