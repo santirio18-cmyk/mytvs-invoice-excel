@@ -70,6 +70,17 @@ def strip_part_from_description(it: dict[str, str]) -> dict[str, str]:
     """Keep item code only in Part Number — remove duplicate from Description."""
     part = str(it.get("part_number") or "").strip()
     desc = str(it.get("description") or "").strip()
+    it = dict(it)
+
+    # Pull leading numeric Item Code into Part Number when missing
+    if not part and desc:
+        m = re.match(r"^(\d{4,8})\s+(.+)$", desc)
+        if m:
+            part = m.group(1)
+            desc = m.group(2).strip()
+            it["part_number"] = part
+            it["description"] = desc
+
     if not part or not desc:
         return it
     variants = {part, part.replace(" ", ""), re.sub(r"\s+", " ", part)}
@@ -89,7 +100,8 @@ def strip_part_from_description(it: dict[str, str]) -> dict[str, str]:
             cleaned = ""
             break
     cleaned = cleaned.strip(" -–:|/")
-    it = dict(it)
+    # Drop trailing HSN + tax% accidentally left in description
+    cleaned = re.sub(r"\s+\d{4,8}\s+\d{1,2}(?:\.\d{1,2})?\s*$", "", cleaned).strip()
     it["description"] = cleaned
     return it
 

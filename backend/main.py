@@ -36,7 +36,7 @@ CORS_ORIGINS = [o.strip() for o in _cors.split(",") if o.strip()] or ["*"]
 
 app = FastAPI(title="myTVS — Invoice to Excel", version="2.0.0")
 
-DEPLOY_MARK = "2026-07-29-karnavati-dedupe"
+DEPLOY_MARK = "2026-07-29-karnavati-itemcode"
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -327,6 +327,11 @@ def find_invoice_number(text: str) -> str:
         re.compile(r"(?:Inv|te)\s*No\.?\s*[:\-]?\s*([A-Z0-9][A-Z0-9\/\-]{1,})", re.I),  # OCR: teNo.
         # Handwritten / sparse: Invoice No | 160
         re.compile(r"Inv[a-z]{0,6}\s*No\.?\s*[|:.\- ]+\s*(\d{2,6})\b", re.I),
+        # ZipERP / Karnavati: "Order No. : Dated :" then "... MADURAI 000089 29/07/2026"
+        re.compile(
+            r"Order\s*No\.?\s*[:\-]?[^\n]{0,60}\n[^\n]*?\b(\d{4,8})\b\s+\d{1,2}/\d{1,2}/\d{2,4}",
+            re.I,
+        ),
     ):
         m = pat.search(text)
         if m:
@@ -530,17 +535,27 @@ def find_supplier(text: str) -> str:
 
 
 def find_place_of_supply(text: str) -> str:
+    def _clean_pos(val: str) -> str:
+        val = _clean(val)
+        # "33-Tamil Nadu Agent" / "Payment Terms" trailing labels
+        val = re.split(r"(?i)\s+(?:Agent|Plant|Payment|Destination|GSTIN)\b", val)[0]
+        return val.strip(" -–:,")[:50]
+
     m = re.search(
         r"Place\s*of\s*(?:Supply|Delivery)\s*[:\-]?\s*(\d{1,2}\s*[-–]?\s*[A-Za-z ]{3,25})",
         text,
         re.I,
     )
     if m:
-        return _clean(m.group(1))[:50]
+        return _clean_pos(m.group(1))
 
-    m = re.search(r"\b(\d{1,2}\s*[-–]\s*(?:Tamil\s*Nadu|Kerala|Karnataka|Andhra\s*Pradesh)[A-Za-z ]*)\b", text, re.I)
+    m = re.search(
+        r"\b(\d{1,2}\s*[-–]\s*(?:Tamil\s*Nadu|Kerala|Karnataka|Andhra\s*Pradesh))\b",
+        text,
+        re.I,
+    )
     if m:
-        return _clean(m.group(1))[:50]
+        return _clean_pos(m.group(1))
 
     m = re.search(r"State\s*Name\s*[:\-]?\s*([A-Za-z ]+)\s*,\s*Code\s*[:\-]?\s*(\d{1,2})", text, re.I)
     if m:
@@ -1344,6 +1359,9 @@ def _item_score(items: list[dict[str, str]]) -> int:
             score += 1
         if it.get("hsn_sac"):
             score += 1
+        # Prefer rows that already split Item Code + HSN (avoid desc-stuffed parsers)
+        if it.get("part_number") and it.get("hsn_sac"):
+            score += 1
     return score
 
 
@@ -1711,12 +1729,58 @@ def parse_mrp_rate_items(text: str) -> list[dict[str, str]]:
     return _dedupe_items(items)
 
 
+def parse_item_code_particulars(text: str) -> list[dict[str, str]]:
+    """
+    Item Code | Particulars | HSN | Tax% | Qty | Unit | Rate | [Disc%] | Amount
+    (Karnavati ZipERP / institutional sales — no MRP column)
+
+    Example:
+      1 990030 COND SWIFT PTL/DSL T-1 84159000 18.00 5 PCS 1,700.00 8,500.00
+    """
+    items: list[dict[str, str]] = []
+    row = re.compile(
+        r"^\s*(?P<sr>\d{1,3})\s+"
+        r"(?P<part>\d{4,8})\s+"
+        r"(?P<desc>[A-Za-z][A-Za-z0-9 \/\.\-\(\)]*?)\s+"
+        r"(?P<hsn>\d{4,8})\s+"
+        r"(?P<tax>\d{1,2}(?:\.\d{1,2})?)\s+"
+        r"(?P<qty>\d+(?:[.,]\d+)?)\s*"
+        r"(?P<unit>PCS|NOS|Nos|SET|Kg|KG)?\s+"
+        r"(?P<rate>[\d,]+\.\d{2})"
+        r"(?:\s+(?P<disc>\d{1,2}(?:\.\d{1,2})?))?\s+"
+        r"(?P<amount>[\d,]+\.\d{2})\s*$",
+        re.I,
+    )
+    for raw in text.splitlines():
+        ln = _clean(raw)
+        if not ln or STOP_ITEM.search(ln):
+            continue
+        m = row.match(ln)
+        if not m:
+            continue
+        unit = (m.group("unit") or "").strip()
+        qty = m.group("qty")
+        items.append(
+            {
+                "part_number": m.group("part"),
+                "description": _clean(m.group("desc")),
+                "hsn_sac": m.group("hsn"),
+                "qty": f"{qty} {unit}".strip(),
+                "mrp": "",
+                "rate": m.group("rate"),
+                "amount": m.group("amount"),
+            }
+        )
+    return _dedupe_items(items)
+
+
 def parse_line_items(text: str) -> list[dict[str, str]]:
     """
     Try multiple generic strategies and keep the best result.
     Not tied to any one supplier — covers digital e-invoices, Tally scans, and photos.
     """
     candidates = [
+        parse_item_code_particulars(text),
         parse_part_mrp_disc_tax_amount(text),
         parse_s_code_nos_items(text),
         parse_einvoice_line_items(text),
