@@ -36,7 +36,7 @@ CORS_ORIGINS = [o.strip() for o in _cors.split(",") if o.strip()] or ["*"]
 
 app = FastAPI(title="myTVS — Invoice to Excel", version="2.0.0")
 
-DEPLOY_MARK = "2026-07-29-mrp-disc"
+DEPLOY_MARK = "2026-07-29-qty-mrp-fix"
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -1006,7 +1006,7 @@ def parse_part_hsn_qty_rate(text: str) -> list[dict[str, str]]:
                     "hsn_sac": mm.group("hsn"),
                     "qty": f"{qty} {unit}".strip(),
                     "mrp": mrp,
-                    "rate": rate or mrp,
+                    "rate": rate,  # net unit only — never copy MRP into Rate
                     "amount": amount,
                 }
             )
@@ -1104,7 +1104,7 @@ def parse_part_mrp_disc_tax_amount(text: str) -> list[dict[str, str]]:
                 "hsn_sac": m.group("hsn"),
                 "qty": f"{qty} {unit}".strip(),
                 "mrp": mrp,
-                "rate": rate or mrp,
+                "rate": rate,  # net unit only — never copy MRP into Rate
                 "amount": amount,
             }
         )
@@ -1230,6 +1230,21 @@ def _normalize_shifted_hsn(items: list[dict[str, str]]) -> list[dict[str, str]]:
     return fixed
 
 
+def _fnum(val: str | None) -> float | None:
+    if not val:
+        return None
+    try:
+        return float(str(val).split()[0].replace(",", ""))
+    except Exception:
+        return None
+
+
+def _repair_qty_mrp_shift(items: list[dict[str, str]], text: str = "") -> list[dict[str, str]]:
+    from extraction.validate import repair_qty_mrp_shift
+
+    return repair_qty_mrp_shift(items, text)
+
+
 def parse_einvoice_line_items(text: str) -> list[dict[str, str]]:
     """
     Digital e-invoice layout (e.g. SRI KARTHICK AGENCY):
@@ -1298,11 +1313,16 @@ def _item_score(items: list[dict[str, str]]) -> int:
             continue
         score += 1
         if it.get("qty"):
-            score += 1
+            qtok = str(it.get("qty") or "").split()[0].replace(",", "")
+            # Penalize MRP/money sitting in Qty
+            if re.fullmatch(r"\d+\.\d{2}", qtok) and float(qtok) >= 100:
+                score -= 2
+            else:
+                score += 1
         if it.get("rate"):
             score += 1
         if it.get("mrp"):
-            score += 1
+            score += 2
         if it.get("amount"):
             score += 2
         if it.get("part_number"):
@@ -1656,7 +1676,7 @@ def parse_mrp_rate_items(text: str) -> list[dict[str, str]]:
                 if q > 0:
                     rate = f"{a / q:.2f}"
             except Exception:
-                rate = mrp
+                rate = ""
         items.append(
             {
                 "part_number": part,
@@ -1664,7 +1684,7 @@ def parse_mrp_rate_items(text: str) -> list[dict[str, str]]:
                 "hsn_sac": m.group("hsn") or "",
                 "qty": f"{qty} {unit}".strip(),
                 "mrp": mrp,
-                "rate": rate or mrp,
+                "rate": rate,  # net unit only — never copy MRP into Rate
                 "amount": amount,
             }
         )
@@ -1713,6 +1733,9 @@ def parse_line_items(text: str) -> list[dict[str, str]]:
                 qty_v = 0
             if qty_v >= 100 and rate_v < 1:
                 continue
+            # MRP/money must not sit in Qty
+            if re.fullmatch(r"\d+\.\d{2}", qty_tok) and qty_v >= 20:
+                continue
             usable.append(it)
         return (_item_score(usable), len(usable), _item_score(items))
 
@@ -1737,9 +1760,12 @@ def parse_line_items(text: str) -> list[dict[str, str]]:
             qty_v = 0
         if qty_v >= 100 and rate_v < 1:
             continue
+        if re.fullmatch(r"\d+\.\d{2}", qty_tok) and qty_v >= 100:
+            # Still keep the row — repair step will move value to MRP
+            pass
         cleaned.append(it)
     if _item_score(cleaned) > 0:
-        return _normalize_shifted_hsn(cleaned)
+        return _repair_qty_mrp_shift(_normalize_shifted_hsn(cleaned), text)
     return []
 
 

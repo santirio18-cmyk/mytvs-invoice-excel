@@ -57,11 +57,139 @@ def find_taxable_total(text: str, item_sum: float | None = None) -> float | None
     return pool[len(pool) // 2]
 
 
+def _fnum(val: str | None) -> float | None:
+    if not val:
+        return None
+    try:
+        return float(str(val).split()[0].replace(",", ""))
+    except Exception:
+        return None
+
+
+def repair_qty_mrp_shift(items: list[dict[str, str]], text: str = "") -> list[dict[str, str]]:
+    """
+    Stop MRP / discount landing in Qty (Ashok Qty→MRP→Dis%→Tax%→Amount layouts).
+
+    Typical failures:
+      qty=364.00 (actually MRP), rate empty/wrong
+      qty=292 Nos (truncated MRP), rate≈0
+      qty=30.00 (Dis%), rate=364.00 (actually MRP)
+    """
+    has_mrp_hdr = bool(re.search(r"(?i)\bmrp\b", (text or "")[:2000]))
+    fixed: list[dict[str, str]] = []
+    for raw in items:
+        it = dict(raw)
+        qty_s = str(it.get("qty") or "").strip()
+        qty_tok = qty_s.split()[0].replace(",", "") if qty_s else ""
+        mrp_s = str(it.get("mrp") or "").strip()
+        rate_s = str(it.get("rate") or "").strip()
+        amt_s = str(it.get("amount") or "").strip()
+        qty_v = _fnum(qty_tok)
+        mrp_v = _fnum(mrp_s)
+        rate_v = _fnum(rate_s)
+        amt_v = _fnum(amt_s)
+
+        def _set_qty(q: float) -> None:
+            it["qty"] = str(int(round(q))) if abs(q - round(q)) < 0.08 else f"{q:.2f}"
+
+        def _derive_qty_from_amount(unit: float) -> bool:
+            if not amt_v or not unit or unit <= 0:
+                return False
+            q = amt_v / unit
+            if 0.5 <= q <= 5000:
+                _set_qty(q)
+                return True
+            return False
+
+        # C first: Dis% in Qty, MRP in Rate (xx.00 ≤100 is discount, not MRP)
+        if (
+            not mrp_v
+            and qty_v is not None
+            and rate_v is not None
+            and amt_v is not None
+            and 0 < qty_v <= 100
+            and re.search(r"\.\d{2}", qty_tok or "")
+            and rate_v >= 50
+            and amt_v > rate_v * 0.15
+        ):
+            disc = qty_v
+            it["mrp"] = rate_s
+            net = rate_v * (1 - disc / 100.0)
+            if net > 0 and _derive_qty_from_amount(net):
+                it["rate"] = f"{net:.2f}"
+            else:
+                it["qty"] = ""
+                it["rate"] = ""
+
+        # A) Qty looks like money → it is MRP (auto-part MRPs usually ≥100)
+        elif qty_tok and re.fullmatch(r"\d+\.\d{2}", qty_tok) and qty_v is not None and qty_v >= 100:
+            if not mrp_v:
+                it["mrp"] = qty_tok
+                mrp_v = qty_v
+            it["qty"] = ""
+            unit = rate_v if rate_v and mrp_v and abs(rate_v - mrp_v) > 0.5 else None
+            if unit and _derive_qty_from_amount(unit):
+                pass
+            elif mrp_v and amt_v and rate_v and 0 < rate_v <= 100:
+                net = mrp_v * (1 - rate_v / 100.0)
+                if net > 0 and _derive_qty_from_amount(net):
+                    it["rate"] = f"{net:.2f}"
+
+        # B) Qty is truncated MRP (292 Nos from 2920.00) under an MRP header
+        elif (
+            has_mrp_hdr
+            and qty_v is not None
+            and qty_v >= 50
+            and (rate_v is None or rate_v < 5)
+            and not mrp_v
+        ):
+            it["mrp"] = f"{qty_v:.2f}"
+            it["qty"] = ""
+            if rate_v and rate_v > 0 and _derive_qty_from_amount(rate_v):
+                pass
+
+        # D) Rate was copied from MRP — keep MRP in mrp, put net unit in rate
+        mrp_v = _fnum(it.get("mrp"))
+        rate_v = _fnum(it.get("rate"))
+        qty_v = _fnum(str(it.get("qty") or "").split()[0] if it.get("qty") else None)
+        amt_v = _fnum(it.get("amount"))
+        if (
+            mrp_v
+            and rate_v
+            and abs(mrp_v - rate_v) < 0.01
+            and qty_v
+            and amt_v
+            and qty_v > 0
+        ):
+            net = amt_v / qty_v
+            if abs(net - mrp_v) > 0.5:
+                it["rate"] = f"{net:.2f}"
+
+        # E) Never leave a large money-looking value in Qty
+        qty_s2 = str(it.get("qty") or "").strip()
+        qty_tok2 = qty_s2.split()[0].replace(",", "") if qty_s2 else ""
+        if qty_tok2 and re.fullmatch(r"\d+\.\d{2}", qty_tok2):
+            q2 = _fnum(qty_tok2)
+            if q2 is not None and q2 >= 100:
+                if not it.get("mrp"):
+                    it["mrp"] = qty_tok2
+                it["qty"] = ""
+
+        fixed.append(it)
+    return fixed
+
+
 def validate_invoice(inv: dict[str, Any], text: str = "") -> dict[str, Any]:
     """
     Attach confidence + warnings. Market tools always reconcile line sums to totals.
     """
-    items = list(inv.get("line_items") or [])
+    items = repair_qty_mrp_shift(
+        list(inv.get("line_items") or []),
+        text or inv.get("raw_text_preview") or "",
+    )
+    inv = dict(inv)
+    inv["line_items"] = items
+
     warnings: list[str] = list(inv.get("warnings") or [])
     amounts = [_money(it.get("amount")) for it in items]
     amounts_f = [a for a in amounts if a is not None and a > 0]
