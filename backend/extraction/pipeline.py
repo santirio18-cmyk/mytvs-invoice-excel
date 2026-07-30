@@ -55,7 +55,7 @@ _JUNK_DESC = (
 def _score_items(items: list[dict[str, str]]) -> int:
     """Prefer rows with real part numbers; penalize footer/bank junk from bbox OCR."""
     score = 0
-    parts = 0
+    real_parts = 0
     junk = 0
     for it in items:
         desc = (it.get("description") or "").strip()
@@ -77,14 +77,19 @@ def _score_items(items: list[dict[str, str]]) -> int:
         if it.get("amount"):
             score += 2
         if part:
-            parts += 1
-            score += 5
+            # Digit-bearing codes are real; short alpha words (Wheel/Minda) are not
+            if any(ch.isdigit() for ch in part):
+                real_parts += 1
+                score += 5
+            elif part.isalpha() and len(part) < 12:
+                score -= 4
+            else:
+                score += 1
         if it.get("hsn_sac"):
             score += 1
-    # Density of real parts beats raw row count from layout OCR
-    if parts:
-        score += parts * 3
-    if junk and not parts:
+    if real_parts:
+        score += real_parts * 3
+    if junk and not real_parts:
         score -= junk * 2
     return score
 

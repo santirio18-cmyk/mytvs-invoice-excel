@@ -36,7 +36,7 @@ CORS_ORIGINS = [o.strip() for o in _cors.split(",") if o.strip()] or ["*"]
 
 app = FastAPI(title="myTVS — Invoice to Excel", version="2.0.0")
 
-DEPLOY_MARK = "2026-07-30-qa-rootfix-2"
+DEPLOY_MARK = "2026-07-30-foolproof"
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -633,6 +633,86 @@ STOP_ITEM = re.compile(
     r"output\s*cgst|output\s*sgst|less\s*:\s*round|percent\s*discount)",
 )
 
+# Words parsers sometimes steal as "part numbers" from description-only lines
+_FALSE_PART_WORDS = frozenset(
+    {
+        "wheel",
+        "boot",
+        "hose",
+        "kit",
+        "nut",
+        "bolt",
+        "set",
+        "red",
+        "white",
+        "black",
+        "oil",
+        "pump",
+        "ring",
+        "seal",
+        "switch",
+        "wire",
+        "lamp",
+        "cover",
+        "type",
+        "size",
+        "item",
+        "goods",
+        "total",
+        "gst",
+        "hsn",
+        "nos",
+        "pcs",
+        "qty",
+        "rate",
+        "amount",
+        "minda",
+        "charges",
+        "courier",
+        "freight",
+        "labour",
+        "packing",
+        "disc",
+        "discount",
+        "spare",
+        "parts",
+        "description",
+        "particulars",
+    }
+)
+
+
+def looks_like_part_number(part: str) -> bool:
+    """True for real part codes; false for product words like Wheel/BOOT/Minda."""
+    p = (part or "").strip()
+    if len(p) < 3:
+        return False
+    if p.lower() in _FALSE_PART_WORDS:
+        return False
+    if any(ch.isdigit() for ch in p):
+        return True
+    # Alpha-only tokens are almost never part numbers on TVS invoices
+    if re.fullmatch(r"[A-Za-z]+", p):
+        return len(p) >= 12
+    # Allow hyphenated / slashed codes without digits (rare)
+    if re.search(r"[-/]", p) and len(p) >= 5:
+        return True
+    return False
+
+
+def _normalize_part_fields(it: dict[str, str]) -> dict[str, str]:
+    """Drop fake part tokens back into description."""
+    it = dict(it)
+    part = str(it.get("part_number") or "").strip()
+    if not part:
+        return it
+    if looks_like_part_number(part):
+        return it
+    desc = str(it.get("description") or "").strip()
+    it["part_number"] = ""
+    it["description"] = _clean(f"{part} {desc}".strip()) if desc else part
+    return it
+
 
 def _fix_money(token: str) -> str:
     """Normalize OCR money like 12,00 / 11,000.00 / 7.90."""
@@ -1086,10 +1166,15 @@ def parse_part_hsn_qty_rate(text: str) -> list[dict[str, str]]:
                     rate = f"{a / q:.2f}"
             except Exception:
                 rate = ""
+            part = mm.group("part")
+            desc = _clean(mm.group("desc"))
+            if not looks_like_part_number(part):
+                desc = _clean(f"{part} {desc}".strip())
+                part = ""
             items.append(
                 {
-                    "part_number": mm.group("part"),
-                    "description": _clean(mm.group("desc")),
+                    "part_number": part,
+                    "description": desc,
                     "hsn_sac": mm.group("hsn"),
                     "qty": f"{qty} {unit}".strip(),
                     "mrp": mrp,
@@ -1125,10 +1210,15 @@ def parse_part_hsn_qty_rate(text: str) -> list[dict[str, str]]:
                     pass
                 if not mrp:
                     mrp = moneys[0]
+        part = m.group("part")
+        desc = _clean(m.group("desc"))
+        if not looks_like_part_number(part):
+            desc = _clean(f"{part} {desc}".strip())
+            part = ""
         items.append(
             {
-                "part_number": m.group("part"),
-                "description": _clean(m.group("desc")),
+                "part_number": part,
+                "description": desc,
                 "hsn_sac": m.group("hsn"),
                 "qty": f"{m.group('qty')} {unit}".strip(),
                 "mrp": mrp,
@@ -1425,11 +1515,14 @@ def _item_score(items: list[dict[str, str]], schema: str | None = None) -> int:
         if it.get("amount"):
             score += 2
         if it.get("part_number"):
-            score += 1
+            if looks_like_part_number(str(it.get("part_number") or "")):
+                score += 2
+            else:
+                score -= 2  # invented product-word "parts" must lose
         if it.get("hsn_sac"):
             score += 1
         # Prefer rows that already split Item Code + HSN (avoid desc-stuffed parsers)
-        if it.get("part_number") and it.get("hsn_sac"):
+        if looks_like_part_number(str(it.get("part_number") or "")) and it.get("hsn_sac"):
             score += 1
     return score
 
@@ -2497,7 +2590,7 @@ def parse_line_items(text: str) -> list[dict[str, str]]:
                 continue
             if re.fullmatch(r"\d+\.\d{2}", qty_tok) and qty_v >= 20:
                 continue
-            if part.strip():
+            if looks_like_part_number(part):
                 parts += 1
             usable.append(it)
         # Prefer filled Part Number rows strongly (stop ghost/HSN-summary winners)
@@ -2511,6 +2604,7 @@ def parse_line_items(text: str) -> list[dict[str, str]]:
     best = max(candidates, key=_quality)
     cleaned = []
     for it in best:
+        it = _normalize_part_fields(dict(it))
         desc = re.sub(r"[^A-Za-z]", "", str(it.get("description") or ""))
         part = str(it.get("part_number") or "")
         if len(desc) < 3 and len(part) < 4:
