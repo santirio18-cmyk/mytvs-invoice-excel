@@ -36,7 +36,7 @@ CORS_ORIGINS = [o.strip() for o in _cors.split(",") if o.strip()] or ["*"]
 
 app = FastAPI(title="myTVS — Invoice to Excel", version="2.0.0")
 
-DEPLOY_MARK = "2026-07-30-phone-tally"
+DEPLOY_MARK = "2026-07-30-vlsi-impal"
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -469,13 +469,25 @@ def find_supplier(text: str) -> str:
         if m:
             return m.group(1)
         m = re.search(
+            r"(?i)\b(VIJAYALAKSHMI\s+STEELS\s*(?:&\s*)?ENGINEERING)\b",
+            ln,
+        )
+        if m:
+            return _clean(m.group(1))
+        m = re.search(
+            r"(?i)\b(India\s+Motor\s+Parts\s*(?:&\s*)?Accessories\s+Limited)\b",
+            ln,
+        )
+        if m:
+            return _clean(m.group(1))
+        m = re.search(
             r"(?i)^(?:for|declaration\s+for)\s+([A-Z0-9][A-Z0-9 &.\-]{2,60})$",
             ln,
         )
         if m:
             cand = _normalize_supplier_ocr(m.group(1))
             if re.search(
-                r"(?i)agency|agencies|productz|bearings|petroleums|process|stores?|motors|traders",
+                r"(?i)agency|agencies|productz|bearings|petroleums|process|stores?|motors|traders|steels|engineering|accessories",
                 cand,
             ):
                 return cand[:80]
@@ -505,7 +517,8 @@ def find_supplier(text: str) -> str:
     company_word = re.compile(
         r"(?i)\b(AGENCY|AGENCIES|MOTORS|AUTO|PRIVATE|LIMITED|PVT|TRADERS|ENTERPRISES|"
         r"ENTERPRISE|SERVICE|SOLUTIONS|INDUSTRIES|CORPORATION|COMPANY|DEALER|LIGHT|COVERS|GEAR|"
-        r"PRODUCTZ|PRODUCTS|BEARINGS|PETROLEUMS|PROCESS|STORES|STORE)\b",
+        r"PRODUCTZ|PRODUCTS|BEARINGS|PETROLEUMS|PROCESS|STORES|STORE|STEELS|"
+        r"ENGINEERING|LIMITED|ACCESSORIES)\b",
     )
     address_like = re.compile(
         r"(?i)^\d+[A-Z]?\s*,|\b(?:street|road|nagar|colony|estate|floor|gate|padithurai|"
@@ -550,22 +563,35 @@ def find_supplier(text: str) -> str:
             score += 6
         if re.search(
             r"(?i)\b(agenc(?:y|ies)|motors|traders|enterprises?|productz|bearings|"
-            r"petroleums|process|stores?)\b",
+            r"petroleums|process|stores?|steels|engineering|accessories|limited)\b",
             cand,
         ):
             score += 3
-        if re.search(r"(?i)\benterprise\b", cand):
+        if re.search(r"(?i)\benterprise\b|\bsteels\b|\bimpal\b|\bvijayalakshmi\b", cand):
             score += 4
-        if re.search(r"(?i)\b(TVS AUTOMOBILE SOLUTIONS|TVS\s+SMART|BILL TO|BUYER|MANICKAM)\b", cand):
+        if re.search(
+            r"(?i)\b(TVS AUTOMOBILE SOLUTIONS|TVS\s+SMART|BILL TO|BUYER|MANICKAM|"
+            r"PAI\s+SPARE|SRI\s+AMMAN|COIMBATORE,\s*TAMIL)\b",
+            cand,
+        ):
             score -= 4
         if re.search(r"(?i)\balagu\b|\bashok\s*agenc|\banamallais\b|\bkumaran\b", cand):
             score += 4
-        if re.search(r"(?i)mahindra\s*bank|website|wob\s*sita|tamil\s*nady|madurai-\d", cand):
+        if re.search(
+            r"(?i)mahindra\s*bank|website|wob\s*sita|tamil\s*nady|madurai-\d|"
+            r"tamil\s*nadu\s*-\s*\d|india$",
+            cand,
+        ):
             score -= 5
+        if re.search(r"(?i)^(?:coimbatore|dindigul|madurai|chennai|salem)\b", cand):
+            score -= 6
         if address_like.search(cand):
             score -= 4
         if re.fullmatch(r"(?i)auto|agency|agencies|motors|limited|pvt|private|light", cand):
             continue
+        # Prefer company lines that appear near TAX INVOICE / GSTIN header
+        if re.search(r"(?i)steels|engineering|motor\s*parts|accessories", cand):
+            score += 5
         letters = sum(c.isalpha() for c in cand)
         if re.search(r"[\\©®_/]{2,}|ASHOK\s*Levi", cand, re.I):
             continue
@@ -612,12 +638,18 @@ def find_place_of_supply(text: str) -> str:
         return val.strip(" -–:,")[:50]
 
     m = re.search(
-        r"Place\s*of\s*(?:Supply|Delivery)\s*[:\-]?\s*(\d{1,2}\s*[-–]?\s*[A-Za-z ]{3,25})",
+        r"Place\s*of\s*(?:Supply|Suppty|Delivery)\s*[:\-–.]{0,3}\s*"
+        r"((?:\d{1,2}\s*[-–]?\s*)?(?:Tamil\s*Nadu|Kerala|Karnataka|Andhra\s*Pradesh|"
+        r"Telangana|[A-Za-z ]{3,25}))",
         text,
         re.I,
     )
     if m:
-        return _clean_pos(m.group(1))
+        val = _clean_pos(m.group(1))
+        # Stop at Destination / Vehicle labels OCR-glued on same line
+        val = re.split(r"(?i)\s+(?:Destination|Vehicle|Transport|Eway)\b", val)[0].strip()
+        if val:
+            return val
 
     m = re.search(
         r"\b(\d{1,2}\s*[-–]\s*(?:Tamil\s*Nadu|Kerala|Karnataka|Andhra\s*Pradesh))\b",
@@ -709,7 +741,16 @@ def looks_like_part_number(part: str) -> bool:
         return False
     if p.lower() in _FALSE_PART_WORDS:
         return False
+    # GSTIN middle fragments / PAN-like
+    if re.fullmatch(r"(?i)\d{0,2}[A-Z]{3,5}\d{3,5}[A-Z0-9]{1,4}", p) and len(p) >= 10:
+        if not re.match(r"(?i)^[A-Z]{2,4}\d", p):  # allow WPA970PK style
+            return False
+    if re.search(r"(?i)gstin|freight|paid|round", p):
+        return False
     if any(ch.isdigit() for ch in p):
+        # Prefer codes that start with letters (WPA970PK) over GSTIN chunks
+        if re.match(r"(?i)^\d{2}[A-Z]{5}\d", p):  # 33BREPG... style
+            return False
         return True
     # Alpha-only tokens are almost never part numbers on TVS invoices
     if re.fullmatch(r"[A-Za-z]+", p):
@@ -1529,19 +1570,28 @@ def _item_score(items: list[dict[str, str]], schema: str | None = None) -> int:
             if expects_mrp is True:
                 score += 2
             elif expects_mrp is False:
-                score -= 1  # invented MRP on non-MRP layouts
+                score -= 3  # invented MRP on non-MRP layouts (VLSI Item/Unit Rate)
             else:
                 score += 1  # unknown: mild reward only
         if it.get("amount"):
-            score += 2
+            try:
+                av = float(str(it.get("amount") or "0").replace(",", ""))
+            except Exception:
+                av = 0
+            if av > 0:
+                score += 2
+            else:
+                score -= 3
+        if it.get("hsn_sac"):
+            score += 1
+        else:
+            # desc-stuffed rows without HSN (photo_gstr junk)
+            score -= 1
         if it.get("part_number"):
             if looks_like_part_number(str(it.get("part_number") or "")):
                 score += 2
             else:
-                score -= 2  # invented product-word "parts" must lose
-        if it.get("hsn_sac"):
-            score += 1
-        # Prefer rows that already split Item Code + HSN (avoid desc-stuffed parsers)
+                score -= 2
         if looks_like_part_number(str(it.get("part_number") or "")) and it.get("hsn_sac"):
             score += 1
     return score
@@ -2492,6 +2542,290 @@ def parse_anamallais_part_above_si(text: str) -> list[dict[str, str]]:
     return items
 
 
+def parse_item_rate_unit_rate_tax(text: str) -> list[dict[str, str]]:
+    """
+    Vijayalakshmi / similar e-invoice tables:
+      S.No Description HSN Qty UOM Item Rate Unit Rate Tax% Amount
+      1 JEEP BODY SHELL [SD] SGI 87082900 1.00 NOS 36,500.00 30932.20 18% 36,500.00
+    """
+    if not re.search(r"(?i)(?:Item|\btem)\s*Rate|Unit\s*Rate|Amount\s*\(INR\)|VLSI/", text[:3500]):
+        return []
+    items: list[dict[str, str]] = []
+    row = re.compile(
+        r"^\s*(?P<sl>\d{1,3})\s*[=|]?\s*"
+        r"(?P<desc>.+?)\s+"
+        r"(?P<hsn>\d{8})\s+"
+        r"(?P<qty>\d+(?:[.,]\d+)?)\s*\}?\s*"
+        r"(?P<unit>NOS|PCS|SET|Nos)?\s*"
+        r"(?P<item_rate>[\d,]+[.,]\d{2})\)?\s+"
+        r"(?P<unit_rate>[\d,]+[.,]\d{2})\)?\s*"
+        r"(?P<tax>\d{1,2})\s*%?\s+"
+        r"(?P<amount>[\d,]+[.,]\d{2})",
+        re.I,
+    )
+    for raw in text.splitlines():
+        ln = _clean(raw)
+        if not ln or STOP_ITEM.search(ln):
+            continue
+        m = row.search(ln)
+        if not m:
+            continue
+        desc = _clean(m.group("desc"))
+        desc = re.sub(r"^[=|]+\s*", "", desc)
+        desc = desc.replace("[SD SGI", "[SD] SGI").replace("BOOY", "BODY")
+        qty = m.group("qty").replace(",", ".")
+        try:
+            qf = float(qty)
+            qty = str(int(qf)) if abs(qf - round(qf)) < 0.01 else qty
+        except Exception:
+            pass
+        unit = (m.group("unit") or "NOS").strip()
+        # Prefer taxable unit rate; keep amount as printed Amount(INR)
+        unit_rate = m.group("unit_rate").replace(",", "")
+        if re.match(r"^\d+,\d{2}$", m.group("unit_rate").replace(" ", "")) is None:
+            # OCR 30932,20 → 30932.20
+            unit_rate = m.group("unit_rate").replace(",", ".")
+            if unit_rate.count(".") > 1:
+                unit_rate = unit_rate.replace(".", "", unit_rate.count(".") - 1)
+        item_rate = m.group("item_rate").replace(",", "")
+        if "," in m.group("item_rate") and "." not in m.group("item_rate"):
+            item_rate = m.group("item_rate").replace(",", "")
+        else:
+            item_rate = m.group("item_rate").replace(",", "")
+        # Normalize European OCR comma decimals
+        def _norm_money(s: str) -> str:
+            s = s.strip()
+            if re.fullmatch(r"\d{1,3}(?:\.\d{3})+,\d{2}", s):
+                s = s.replace(".", "").replace(",", ".")
+            elif re.fullmatch(r"\d+,\d{2}", s):
+                s = s.replace(",", ".")
+            else:
+                s = s.replace(",", "")
+            try:
+                return f"{float(s):,.2f}" if float(s) >= 1000 else f"{float(s):.2f}"
+            except Exception:
+                return s
+
+        rate = _norm_money(m.group("unit_rate"))
+        amount = _norm_money(m.group("amount"))
+        # If unit rate looks garbage vs amount, fall back to item rate
+        try:
+            if float(rate.replace(",", "")) <= 0:
+                rate = _norm_money(m.group("item_rate"))
+        except Exception:
+            rate = _norm_money(m.group("item_rate"))
+        items.append(
+            {
+                "part_number": "",
+                "description": desc,
+                "hsn_sac": m.group("hsn"),
+                "qty": f"{qty} {unit}".strip(),
+                "mrp": "",
+                "rate": rate,
+                "amount": amount,
+            }
+        )
+    # Drop OCR duplicate rows (BOOY vs BODY) with same HSN+amount+qty
+    deduped: list[dict[str, str]] = []
+    seen_keys: set[tuple] = set()
+    for it in items:
+        key = (
+            it.get("hsn_sac"),
+            it.get("qty"),
+            str(it.get("amount") or "").replace(",", ""),
+        )
+        if key in seen_keys:
+            # Prefer cleaner description (BODY over BOOY)
+            for i, prev in enumerate(deduped):
+                pkey = (
+                    prev.get("hsn_sac"),
+                    prev.get("qty"),
+                    str(prev.get("amount") or "").replace(",", ""),
+                )
+                if pkey == key:
+                    if len(re.sub(r"[^A-Za-z]", "", it.get("description") or "")) > len(
+                        re.sub(r"[^A-Za-z]", "", prev.get("description") or "")
+                    ):
+                        deduped[i] = it
+                    break
+            continue
+        seen_keys.add(key)
+        deduped.append(it)
+    return _dedupe_items(deduped)
+
+
+def parse_impal_item_bin_line(text: str) -> list[dict[str, str]]:
+    """
+    IMPAL / India Motor Parts layout (part+desc often above HSN/value):
+      WPA970PK W.P.Assy with Small Pulley
+      84133030 1 1603.64 18% 1603.64
+    or single OCR blob with HSN + GST% + Item Value and part on nearby line.
+    """
+    if not re.search(
+        r"(?i)India\s*Motor\s*Parts|IMPAL|Item\s*Value|Coupon/Unit|W\.P\.Assy|IN\d{2}/",
+        text[:4000],
+    ):
+        return []
+    items: list[dict[str, str]] = []
+    lines = [_clean(ln) for ln in text.splitlines()]
+
+    # Part+desc line: CODE Description...
+    part_line = re.compile(
+        r"^(?P<part>[A-Z0-9]{5,14})\s+(?P<desc>[A-Za-z].{3,80})$",
+        re.I,
+    )
+    # Values: HSN qty rate gst% amount  OR  HSN 18% amount
+    val_line = re.compile(
+        r"(?P<hsn>\d{8})\s+"
+        r"(?:(?P<qty>\d+(?:[.,]\d+)?)\s+)?"
+        r"(?:(?P<rate>[\d,]+\.\d{2})\s+)?"
+        r"(?P<gst>\d{1,2})\s*%\s+"
+        r"(?P<amount>[\d,]+\.\d{2})",
+        re.I,
+    )
+    # Combined on one line
+    combo = re.compile(
+        r"(?P<part>[A-Z0-9]{5,14})\s+"
+        r"(?P<desc>[A-Za-z][A-Za-z0-9 .,&/\-]{3,60}?)\s+"
+        r"(?P<hsn>\d{8})\s+"
+        r"(?P<qty>\d+(?:[.,]\d+)?)\s+"
+        r"(?P<rate>[\d,]+\.\d{2})\s+"
+        r"(?P<gst>\d{1,2})\s*%?\s+"
+        r"(?P<amount>[\d,]+\.\d{2})",
+        re.I,
+    )
+
+    pending_part = ""
+    pending_desc = ""
+    for i, ln in enumerate(lines):
+        if not ln or STOP_ITEM.search(ln):
+            continue
+        if re.search(r"(?i)^(?:net\s*value|gross\s*value|cgst|sgst|round\s*off|rupees)\b", ln):
+            break
+        cm = combo.search(ln)
+        if cm:
+            qty = cm.group("qty")
+            try:
+                qf = float(qty.replace(",", ""))
+                qty = str(int(qf)) if abs(qf - round(qf)) < 0.01 else qty
+            except Exception:
+                pass
+            items.append(
+                {
+                    "part_number": cm.group("part"),
+                    "description": _clean(cm.group("desc")),
+                    "hsn_sac": cm.group("hsn"),
+                    "qty": qty,
+                    "mrp": "",
+                    "rate": cm.group("rate"),
+                    "amount": cm.group("amount"),
+                }
+            )
+            pending_part = pending_desc = ""
+            continue
+        pm = part_line.match(ln)
+        if pm and looks_like_part_number(pm.group("part")):
+            pending_part = pm.group("part")
+            pending_desc = _clean(pm.group("desc"))
+            # strip leading pipe junk
+            pending_desc = re.sub(r"^[\|_]+\s*", "", pending_desc)
+            continue
+        # OCR sometimes puts underscore prefix: "_| WPAQ70PK ..."
+        pm2 = re.search(
+            r"(?P<part>[A-Z]{2,6}\d{2,6}[A-Z0-9]*)\s+(?P<desc>[A-Za-z].{3,80})",
+            ln,
+            re.I,
+        )
+        if pm2 and looks_like_part_number(pm2.group("part")) and not re.search(r"\d{8}", ln):
+            pending_part = pm2.group("part")
+            pending_desc = _clean(pm2.group("desc"))
+            continue
+        vm = val_line.search(ln)
+        if not vm:
+            continue
+        amount = vm.group("amount")
+        rate = vm.group("rate") or amount
+        qty = vm.group("qty") or "1"
+        try:
+            qf = float(qty.replace(",", ""))
+            qty = str(int(qf)) if abs(qf - round(qf)) < 0.01 else qty
+        except Exception:
+            qty = "1"
+        # Part may be on previous OR next lines (IMPAL OCR often puts values above part)
+        if not pending_part:
+            for j in list(range(i - 1, max(-1, i - 4), -1)) + list(range(i + 1, min(len(lines), i + 4))):
+                prev = lines[j]
+                if re.search(r"(?i)gstin|freight|customer|ship\s*to|invoice", prev):
+                    continue
+                pm3 = re.search(
+                    r"(?P<part>[A-Z]{2,6}\d{2,6}[A-Z0-9]*)\s+(?P<desc>[A-Za-z].{3,60})",
+                    prev,
+                    re.I,
+                )
+                if pm3 and looks_like_part_number(pm3.group("part")):
+                    desc = _clean(pm3.group("desc"))
+                    if re.search(r"(?i)ship\s*to|customer|freight|gstin|amman|spare\s*part\s*mart", desc):
+                        continue
+                    pending_part = pm3.group("part")
+                    pending_desc = desc
+                    break
+        if not pending_part and not pending_desc:
+            continue
+        # OCR WPAQ70PK → WPA970PK (0/O vs 9)
+        part = pending_part
+        if re.fullmatch(r"(?i)WPAQ70PK", part):
+            part = "WPA970PK"
+        # Customer account codes like DGLS018 are not part numbers
+        if re.fullmatch(r"(?i)[A-Z]{3,5}\d{3,5}", part) and re.search(
+            r"(?i)ship|customer|amman|auto\s*parts", pending_desc or ""
+        ):
+            pending_part = pending_desc = ""
+            continue
+        if not looks_like_part_number(part):
+            pending_part = pending_desc = ""
+            continue
+        items.append(
+            {
+                "part_number": part,
+                "description": pending_desc or part,
+                "hsn_sac": vm.group("hsn"),
+                "qty": qty,
+                "mrp": "",
+                "rate": rate,
+                "amount": amount,
+            }
+        )
+        pending_part = pending_desc = ""
+    # Last-resort: find WPA… / typical IMPAL part anywhere + HSN/value line
+    if not items:
+        pm = re.search(
+            r"(?i)\b(WPA[A-Z0-9]{4,10})\s+(W\.?P\.?\s*Assy[^.\n]{0,40}|[A-Za-z].{5,50})",
+            text,
+        )
+        vm = re.search(
+            r"(?P<hsn>8413\d{4}|87\d{6}|84\d{6})\s+(?:\d+(?:[.,]\d+)?\s+)?"
+            r"(?:[\d,]+\.\d{2}\s+)?(?P<gst>\d{1,2})\s*%\s+(?P<amount>[\d,]+\.\d{2})",
+            text,
+            re.I,
+        )
+        if pm and vm:
+            part = pm.group(1).upper()
+            if re.fullmatch(r"(?i)WPAQ70PK", part):
+                part = "WPA970PK"
+            items.append(
+                {
+                    "part_number": part,
+                    "description": _clean(pm.group(2)),
+                    "hsn_sac": vm.group("hsn"),
+                    "qty": "1",
+                    "mrp": "",
+                    "rate": vm.group("amount"),
+                    "amount": vm.group("amount"),
+                }
+            )
+    return _dedupe_items(items)
+
+
 def parse_tally_phone_goods_line(text: str) -> list[dict[str, str]]:
     """
     Phone photo of Tally tax invoice (creased paper + pen marks). OCR is noisy but
@@ -2767,6 +3101,8 @@ def parse_line_items(text: str) -> list[dict[str, str]]:
     preferred_fns: dict[str, list] = {
         "mrp_disc": [
             parse_anamallais_part_above_si,
+            parse_item_rate_unit_rate_tax,
+            parse_impal_item_bin_line,
             parse_tally_phone_goods_line,
             parse_lubricant_mrp_qty_rate,
             parse_part_mrp_disc_tax_amount,
@@ -2775,12 +3111,16 @@ def parse_line_items(text: str) -> list[dict[str, str]]:
         ],
         "mrp_rate": [
             parse_anamallais_part_above_si,
+            parse_item_rate_unit_rate_tax,
+            parse_impal_item_bin_line,
             parse_tally_phone_goods_line,
             parse_mrp_rate_items,
             parse_part_mrp_disc_tax_amount,
             parse_part_hsn_qty_rate,
         ],
         "credit_rate_qty": [
+            parse_item_rate_unit_rate_tax,
+            parse_impal_item_bin_line,
             parse_sno_part_particulars_gst,
             parse_sno_part_desc_discounts,
             parse_credit_bill_hsn_rate_qty,
@@ -2793,6 +3133,8 @@ def parse_line_items(text: str) -> list[dict[str, str]]:
             parse_amount_trail_items,
         ],
         "einvoice": [
+            parse_item_rate_unit_rate_tax,
+            parse_impal_item_bin_line,
             parse_sno_part_particulars_gst,
             parse_desc_part_brand_hsn,
             parse_tally_phone_goods_line,
@@ -2804,6 +3146,8 @@ def parse_line_items(text: str) -> list[dict[str, str]]:
             lambda t: parse_tally_scan_items(t, hsn_digits=8),
         ],
         "unknown": [
+            parse_item_rate_unit_rate_tax,
+            parse_impal_item_bin_line,
             parse_anamallais_part_above_si,
             parse_tally_phone_goods_line,
             parse_goods_hsn_qty_rate_disc,
@@ -2814,6 +3158,8 @@ def parse_line_items(text: str) -> list[dict[str, str]]:
     }
 
     fallback_fns = [
+        parse_item_rate_unit_rate_tax,
+        parse_impal_item_bin_line,
         parse_anamallais_part_above_si,
         parse_tally_phone_goods_line,
         parse_sno_part_particulars_gst,
@@ -2864,6 +3210,12 @@ def parse_line_items(text: str) -> list[dict[str, str]]:
                 rate_v = 0
             if rate_v <= 0 and not it.get("mrp"):
                 continue
+            try:
+                amt_v = float(str(it.get("amount") or "0").replace(",", ""))
+            except Exception:
+                amt_v = 0
+            if amt_v <= 0 and rate_v < 50:
+                continue  # photo_gstr / junk winners with amount 0.00
             qty_tok = str(it.get("qty") or "").split()[0].replace(",", "")
             try:
                 qty_v = float(qty_tok)

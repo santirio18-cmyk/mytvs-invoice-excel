@@ -68,6 +68,10 @@ def detect_table_layout(text: str) -> LayoutSchema:
     if has_brand and has_part and has_hsn:
         return "einvoice"
 
+    # Item Rate + Unit Rate + Tax% (Vijayalakshmi / similar) — OCR may drop leading I
+    if re.search(r"(?i)(?:item|\btem)\s*rate", hdr) and re.search(r"(?i)unit\s*rate", hdr):
+        return "einvoice"
+
     # Ashok: Qty MRP Dis% Tax% Amount
     if has_mrp and has_disc:
         return "mrp_disc"
