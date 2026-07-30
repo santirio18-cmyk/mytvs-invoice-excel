@@ -37,10 +37,35 @@ def _image_bytes_for_ai(data: bytes, filename: str) -> tuple[bytes, str] | None:
     return None
 
 
+_JUNK_DESC = (
+    "account no",
+    "branch name",
+    "bank name",
+    "ifsc",
+    "gstin",
+    "authorised signatory",
+    "declaration",
+    "terms & conditions",
+    "amount chargeable",
+    "tax amount",
+    "rounded off",
+)
+
+
 def _score_items(items: list[dict[str, str]]) -> int:
+    """Prefer rows with real part numbers; penalize footer/bank junk from bbox OCR."""
     score = 0
+    parts = 0
+    junk = 0
     for it in items:
-        if not (it.get("description") or it.get("part_number")):
+        desc = (it.get("description") or "").strip()
+        part = (it.get("part_number") or "").strip()
+        if not (desc or part):
+            continue
+        low = desc.lower()
+        if any(j in low for j in _JUNK_DESC) or low in {"line item", "item"}:
+            junk += 1
+            score -= 4
             continue
         score += 1
         if it.get("qty"):
@@ -51,10 +76,16 @@ def _score_items(items: list[dict[str, str]]) -> int:
             score += 1
         if it.get("amount"):
             score += 2
-        if it.get("part_number"):
-            score += 1
+        if part:
+            parts += 1
+            score += 5
         if it.get("hsn_sac"):
             score += 1
+    # Density of real parts beats raw row count from layout OCR
+    if parts:
+        score += parts * 3
+    if junk and not parts:
+        score -= junk * 2
     return score
 
 

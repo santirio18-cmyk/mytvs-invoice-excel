@@ -36,7 +36,7 @@ CORS_ORIGINS = [o.strip() for o in _cors.split(",") if o.strip()] or ["*"]
 
 app = FastAPI(title="myTVS — Invoice to Excel", version="2.0.0")
 
-DEPLOY_MARK = "2026-07-30-layout-schema"
+DEPLOY_MARK = "2026-07-30-qa-rootfix-2"
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -316,6 +316,18 @@ def find_invoice_number(text: str) -> str:
         if _is_plausible_invoice_no(val):
             return val
 
+    # Shell/lubricant style SL/26/27/3722
+    for m in re.finditer(r"\b([A-Z]{1,4}\/\d{2}\/\d{2}\/\d{3,6})\b", text, re.I):
+        val = _normalize_invoice_no(_clean(m.group(1)))
+        if _is_plausible_invoice_no(val):
+            return val
+
+    # Bare serial/FY — 3405/26-27
+    for m in re.finditer(r"\b(\d{3,5}\/\d{2}-\d{2})\b", text):
+        val = _normalize_invoice_no(_clean(m.group(1)))
+        if _is_plausible_invoice_no(val):
+            return val
+
     # Highest priority: common Indian invoice labels (any supplier)
     for pat in (
         re.compile(r"Bill\s*No\.?\s*[:\-]?\s*([A-Z0-9][A-Z0-9\/\-]*)", re.I),
@@ -438,12 +450,29 @@ def find_date(text: str) -> str:
 def find_supplier(text: str) -> str:
     """Generic supplier detection — seller header only, not buyer/consignee."""
     lines = [_clean(ln) for ln in text.splitlines() if _clean(ln)]
-    # Supplier lives above buyer / bill-to blocks
+
+    # Explicit footer / brand markers
+    for ln in lines:
+        m = re.search(r"(?i)\b(KARPAGAM\s+AUTO\s+STORES)\b", ln)
+        if m:
+            return m.group(1)
+        m = re.search(
+            r"(?i)^(?:for|declaration\s+for)\s+([A-Z0-9][A-Z0-9 &.\-]{2,60})$",
+            ln,
+        )
+        if m:
+            cand = _normalize_supplier_ocr(m.group(1))
+            if re.search(
+                r"(?i)agency|agencies|productz|bearings|petroleums|process|stores?|motors|traders",
+                cand,
+            ):
+                return cand[:80]
+
     cut = len(lines)
-    for i, ln in enumerate(lines[:40]):
+    for i, ln in enumerate(lines[:50]):
         if re.search(
-            r"(?i)^(buyer|bill\s*to|consignee|ship\s*to|to[,\.]?\s|customer\s*name|"
-            r"tvs\b|details\s*of\s*receiver|receiver\s*\()",
+            r"(?i)^(buyer|bill\s*to|billed\s*to|consignee|ship\s*to|shipped\s*to|to[,.]?\s|"
+            r"customer\s*name|tvs\b|details\s*of\s*receiver|receiver\s*\(|bill\s*to\s*party)",
             ln,
         ):
             cut = i
@@ -454,14 +483,21 @@ def find_supplier(text: str) -> str:
     header = lines[: max(cut, 1)]
 
     skip = re.compile(
-        r"(?i)^[\(\[]?\s*(tax\s*invoice|taxinvoice|auto\s*taxinvoice|original|duplicate|page|"
-        r"gstin|state|e-?mail|contact|phone|invoice|dated|bill\s*to|buyer|consignee|ship|"
-        r"delivery|reference|dlr|sap|irn|ack\s*no|payment|to\.|e-?invoice|item\s*name|thanks|"
-        r"transport|banks?\s*details|hsn|terms|credit\s*bill|debit\s*bill)$",
+        r"(?i)^[\(\[]?\s*(tax\s*invoice|taxinvoice|tax\s*sales|auto\s*taxinvoice|original|"
+        r"duplicate|page|gst\s*invoice|office\s*copy|"
+        r"gstin|state|e-?mail|contact|phone|invoice|dated|bill\s*to|billed\s*to|buyer|"
+        r"consignee|ship|delivery|reference|dlr|sap|irn|ack\s*no|payment|to\.|e-?invoice|"
+        r"item\s*name|thanks|transport|banks?\s*details|hsn|terms|credit\s*bill|debit\s*bill|"
+        r"original\s*for\s*recipient|recipient)\b",
     )
     company_word = re.compile(
         r"(?i)\b(AGENCY|AGENCIES|MOTORS|AUTO|PRIVATE|LIMITED|PVT|TRADERS|ENTERPRISES|"
-        r"SERVICE|SOLUTIONS|INDUSTRIES|CORPORATION|COMPANY|DEALER|LIGHT|COVERS|GEAR)\b",
+        r"SERVICE|SOLUTIONS|INDUSTRIES|CORPORATION|COMPANY|DEALER|LIGHT|COVERS|GEAR|"
+        r"PRODUCTZ|PRODUCTS|BEARINGS|PETROLEUMS|PROCESS|STORES|STORE)\b",
+    )
+    address_like = re.compile(
+        r"(?i)^\d+[A-Z]?\s*,|\b(?:street|road|nagar|colony|estate|floor|gate|padithurai)\b|"
+        r"^\d{1,4}[,\-]|pin\s*code|madurai$|salem$|coimbatore$",
     )
 
     scored: list[tuple[int, str]] = []
@@ -470,15 +506,20 @@ def find_supplier(text: str) -> str:
             continue
         if re.search(r"GSTIN", ln, re.I):
             continue
+        if address_like.search(ln) and not company_word.search(ln):
+            continue
         if re.search(r"\d{6}\s*$", ln) and not company_word.search(ln):
             continue
         cand = re.split(r"\s{2,}|GSTIN|NO\.?\d", ln, flags=re.I)[0].strip()
         cand = re.split(r"(?i)\s+(?:invoice|fivoes|tie:|dated|gstin|sstin)", cand)[0].strip()
+        # Strip Tally-style " - (from 1-Apr-25)" fiscal tags
+        cand = re.sub(r"\s*[-–]?\s*\(from\s+[^)]+\)\s*$", "", cand, flags=re.I).strip()
         cand = _normalize_supplier_ocr(cand)
         if not cand:
             continue
-        # Don't treat invoice numbers containing AUTO as supplier
         if re.search(r"\d{2}-\d{2}-[A-Z]+-\d+", cand):
+            continue
+        if re.search(r"(?i)^(?:billed\s*to|shipped\s*to|bill\s*to)\b", cand):
             continue
         score = 0
         if company_word.search(cand):
@@ -487,18 +528,22 @@ def find_supplier(text: str) -> str:
             score += 2
         if i < 8:
             score += 2
-        if re.match(r"(?i)^autolight\b", cand):
+        if re.match(r"(?i)^autolight\b|^a\.\s*l\.\s*a\.|^anbu\b|^arvind\b|^hema\b|^ask\b", cand):
             score += 6
-        if re.search(r"(?i)\b(agenc(?:y|ies)|motors|traders|enterprises)\b", cand):
-            score += 2
-        # Prefer seller-side words; downrank buyer-ish if leaked
+        if re.search(
+            r"(?i)\b(agenc(?:y|ies)|motors|traders|enterprises|productz|bearings|"
+            r"petroleums|process|stores?)\b",
+            cand,
+        ):
+            score += 3
         if re.search(r"(?i)\b(TVS AUTOMOBILE SOLUTIONS|TVS\s+SMART|BILL TO|BUYER)\b", cand):
             score -= 4
-        if re.search(r"(?i)\balagu\b|\bashok\s*agenc", cand):
+        if re.search(r"(?i)\balagu\b|\bashok\s*agenc|\banamallais\b", cand):
             score += 4
-        # Downrank OCR noise / website / bank lines
         if re.search(r"(?i)mahindra\s*bank|website|wob\s*sita|tamil\s*nady", cand):
             score -= 5
+        if address_like.search(cand):
+            score -= 4
         if re.fullmatch(r"(?i)auto|agency|agencies|motors|limited|pvt|private|light", cand):
             continue
         letters = sum(c.isalpha() for c in cand)
@@ -508,12 +553,11 @@ def find_supplier(text: str) -> str:
             if not re.search(r"(?i)^(?:gstin|sstin|uin)", cand):
                 scored.append((score, cand))
 
-    # After seller GSTIN, next company-like line
     for i, ln in enumerate(header[:12]):
         if re.search(r"GSTIN", ln, re.I):
             for j in range(i + 1, min(i + 4, len(header))):
                 cand = _normalize_supplier_ocr(header[j])
-                if skip.search(cand):
+                if skip.search(cand) or address_like.search(cand):
                     continue
                 if company_word.search(cand) or (cand.isupper() and len(cand) > 5):
                     if not re.search(r"(?i)gstin|sstin", cand):
@@ -523,14 +567,20 @@ def find_supplier(text: str) -> str:
     if scored:
         scored.sort(key=lambda x: (-x[0], -len(x[1])))
         best = scored[0][1]
-        # If we recovered a brand like AUTOLIGHT and AGENCY appears in the header, join them
         header_blob = "\n".join(header[:30])
         if re.search(r"(?i)\bagenc(?:y|ies)|\bency\b", header_blob) and not re.search(
             r"(?i)\bagenc", best
         ):
             if re.search(r"(?i)light|auto|motors|traders|enterprises", best):
                 best = f"{best} AGENCY"
-        return best
+        return best[:80]
+
+    for ln in reversed(lines[-30:]):
+        m = re.search(r"(?i)(?:^for\s+|declaration\s+for\s+)([A-Z][A-Za-z0-9 &.\-]{2,50})", ln)
+        if m:
+            cand = _normalize_supplier_ocr(m.group(1))
+            if re.search(r"(?i)agency|productz|bearings|petroleums|process|stores?|motors", cand) or len(cand) >= 8:
+                return cand[:80]
     return "Unknown"
 
 
@@ -579,7 +629,8 @@ STOP_ITEM = re.compile(
     r"(?i)(amount\s*chargeable|tax\s*amount|cgst|sgst|igst|round\s*off|grand\s*total|"
     r"continued\s*to\s*page|computer\s*generated|bank\s*name|declaration|"
     r"taxable\s*value|subject\s*to|authori[sz]ed\s*sign|brought\s*forward|sub\s*total|"
-    r"^total\b|net\s*amount|rounded\s*off)",
+    r"^total\b|net\s*amount|rounded\s*off|hsn\s*summary|company.?s\s*bank|"
+    r"output\s*cgst|output\s*sgst|less\s*:\s*round|percent\s*discount)",
 )
 
 
@@ -1792,6 +1843,547 @@ def parse_item_code_particulars(text: str) -> list[dict[str, str]]:
     return _dedupe_items(items)
 
 
+
+def parse_sno_part_particulars_gst(text: str) -> list[dict[str, str]]:
+    """
+    S.No PART No PARTICULARS HSN GSTR% QTY Rate [Dis%] AMOUNT
+    ALA / Autolight Coimbatore style:
+      1 7818-1501 Gates Cummins Water Pump 87089100 18 % 1 NOS 2,607.00 39 % 1,590.27
+      1 12569 P)12V H4 100/90W P43T 85392120 18 % 30 NOS 133.90 4,017.00
+    """
+    items: list[dict[str, str]] = []
+    row = re.compile(
+        r"^\s*(?P<sl>\d{1,3})\s+"
+        r"(?P<part>[A-Z0-9][A-Z0-9\-]{2,})\s+"
+        r"(?P<desc>.+?)\s+"
+        r"(?P<hsn>\d{4,8})\s+"
+        r"(?P<gst>\d{1,2})\s*%?\s+"
+        r"(?P<qty>\d+(?:[.,]\d+)?)\s*"
+        r"(?P<unit>NOS|Nos|PCS|SET|PKT)?\s+"
+        r"(?P<rate>[\d,]+\.\d{2})"
+        r"(?:\s+(?P<disc>\d{1,2}(?:\.\d{1,2})?)\s*%?)?\s+"
+        r"(?P<amount>[\d,]+\.\d{2})\s*$",
+        re.I,
+    )
+    for raw in text.splitlines():
+        ln = _clean(raw)
+        if not ln or STOP_ITEM.search(ln):
+            continue
+        m = row.match(ln)
+        if not m:
+            continue
+        unit = (m.group("unit") or "").strip()
+        items.append(
+            {
+                "part_number": m.group("part"),
+                "description": _clean(m.group("desc")),
+                "hsn_sac": m.group("hsn"),
+                "qty": f"{m.group('qty')} {unit}".strip(),
+                "mrp": "",
+                "rate": m.group("rate"),
+                "amount": m.group("amount"),
+            }
+        )
+    return _dedupe_items(items)
+
+
+def parse_desc_part_brand_hsn(text: str) -> list[dict[str, str]]:
+    """
+    S.No DESCRIPTION PARTNO BRAND HSN QTY UOM RATE GST TAXABLE
+    Karpagam Auto Stores style:
+      1 HAND BR HOSE ... LEYLAND 91514YA ADEENA 39172390 1 NOS 249.70 18 249.70
+      9 LEYLAND U TRUCK FAN BELT 8PK-1552CONTITECH 40103390 1 NOS 598.90 18 598.90
+      33 COURIER CHARGES 996812 1 750.00 18 750.00
+    """
+    if not re.search(r"(?i)PART\s*NO|PARTNO", text[:2500]):
+        return []
+    items: list[dict[str, str]] = []
+    # Brand optional — OCR often glues brand onto part (CONTITECH, STAR)
+    # Unit required so courier/SAC lines don't steal CHARGES as part no.
+    row = re.compile(
+        r"^\s*(?P<sl>\d{1,3})\s+"
+        r"(?P<desc>.+?)\s+"
+        r"(?P<part>[A-Z0-9][A-Z0-9\/\-]{2,})\s+"
+        r"(?:(?P<brand>[A-Z][A-Z0-9\-]{1,12})\s+)?"
+        r"(?P<hsn>\d{4,8})\s+"
+        r"(?P<qty>\d+(?:[.,]\d+)?)\s*"
+        r"(?P<unit>NOS|SET|PCS|PKT|KIT|Nos)\s+"
+        r"(?P<rate>[\d,]+\.\d{2})\s+"
+        r"(?P<gst>\d{1,2})\s+"
+        r"(?P<amount>[\d,]+\.\d{2})\s*$",
+        re.I,
+    )
+    # Courier / SAC-only charges without part+brand
+    charge = re.compile(
+        r"^\s*(?P<sl>\d{1,3})\s+"
+        r"(?P<desc>[A-Z][A-Z0-9 \/\-]{3,}?)\s+"
+        r"(?P<hsn>\d{4,8})\s+"
+        r"(?P<qty>\d+(?:[.,]\d+)?)\s+"
+        r"(?P<rate>[\d,]+\.\d{2})\s+"
+        r"(?P<gst>\d{1,2})\s+"
+        r"(?P<amount>[\d,]+\.\d{2})\s*$",
+        re.I,
+    )
+    for raw in text.splitlines():
+        ln = _clean(raw)
+        if not ln or STOP_ITEM.search(ln):
+            continue
+        # Skip HSN summary rows (description is a commodity class sentence)
+        if re.search(r"(?i)^(?:tubes|other|locks|natural|threaded|postal|scan)\b", ln):
+            continue
+        m = row.match(ln)
+        if m:
+            part = m.group("part")
+            # Split glued brand suffix when present (…CONTITECH / …STAR)
+            for brand_s in ("CONTITECH", "STAR", "VELFIT", "VULCAN"):
+                if part.upper().endswith(brand_s) and len(part) > len(brand_s) + 2:
+                    part = part[: -len(brand_s)]
+                    break
+            unit = (m.group("unit") or "").strip()
+            items.append(
+                {
+                    "part_number": part,
+                    "description": _clean(m.group("desc")),
+                    "hsn_sac": m.group("hsn"),
+                    "qty": f"{m.group('qty')} {unit}".strip(),
+                    "mrp": "",
+                    "rate": m.group("rate"),
+                    "amount": m.group("amount"),
+                }
+            )
+            continue
+        m2 = charge.match(ln)
+        if not m2:
+            continue
+        if not re.search(r"(?i)courier|freight|packing|transport|labour", m2.group("desc")):
+            continue
+        items.append(
+            {
+                "part_number": "",
+                "description": _clean(m2.group("desc")),
+                "hsn_sac": m2.group("hsn"),
+                "qty": m2.group("qty"),
+                "mrp": "",
+                "rate": m2.group("rate"),
+                "amount": m2.group("amount"),
+            }
+        )
+    return _dedupe_items(items)
+
+
+def parse_sno_part_desc_discounts(text: str) -> list[dict[str, str]]:
+    """
+    S.No PartNo Description HSN Qty Unit Rate Dis% [CD%] Tax% Amount
+    ASK Automobile / similar counter invoices (multi-line desc ignored on wrap).
+      1 CS607822 " R/SPRING LEAF 73181500 4 Pcs 135.00 15.00 5.00 18 436.05
+    """
+    items: list[dict[str, str]] = []
+    by_sl: dict[int, dict[str, str]] = {}
+    row = re.compile(
+        r"^\s*(?P<sl>\d{1,3})\s+"
+        r"(?P<part>[A-Z0-9][A-Z0-9\/\-]{2,})\s+"
+        r"(?P<desc>.+?)\s+"
+        r"(?P<hsn>\d{4,8})\s+"
+        r"(?P<qty>\d+(?:[.,]\d+)?)\s*"
+        r"(?P<unit>Pcs|PCS|Nos|NOS|EACH|Eacg|Kit|SET)?\s+"
+        r"(?P<rate>[\d,]+\.\d{2})\s+"
+        r"(?:(?P<disc>\d{1,2}(?:\.\d{1,2})?)\s+)?"
+        r"(?:(?P<cd>\d{1,2}(?:\.\d{1,2})?)\s+)?"
+        r"(?P<tax>\d{1,2})\s+"
+        r"(?P<amount>[\d,]+\.\d{2})\s*$",
+        re.I,
+    )
+    for raw in text.splitlines():
+        ln = _clean(raw)
+        if not ln or STOP_ITEM.search(ln):
+            continue
+        m = row.match(ln)
+        if not m:
+            continue
+        # HSN summary: qty huge + no unit often — still allow with unit
+        unit = (m.group("unit") or "").strip()
+        if unit.lower() == "eacg":
+            unit = "EACH"
+        sl = int(m.group("sl"))
+        it = {
+            "part_number": m.group("part"),
+            "description": _clean(m.group("desc")).strip('"'),
+            "hsn_sac": m.group("hsn"),
+            "qty": f"{m.group('qty')} {unit}".strip(),
+            "mrp": m.group("rate"),  # list price before discount on these bills
+            "rate": "",  # net derived from amount/qty
+            "amount": m.group("amount"),
+        }
+        try:
+            q = float(m.group("qty").replace(",", ""))
+            a = float(m.group("amount").replace(",", ""))
+            if q > 0:
+                it["rate"] = f"{a / q:.2f}"
+        except Exception:
+            it["rate"] = m.group("rate")
+        by_sl[sl] = it
+    items = [by_sl[k] for k in sorted(by_sl)]
+    return items
+
+
+def parse_goods_hsn_qty_rate_disc(text: str) -> list[dict[str, str]]:
+    """
+    SI Description HSN Qty Unit Rate [Unit] Disc% Amount
+    HEMA / MB Agencies / PR Process Tally style:
+      1 LX 3630KIT(KFK0249506) 84213100 1 NOS 822.00 NOS 13.76 % 708.89
+      1 VT 1203001(Elec Oil...) 90262000 18% 2 nos 467.00 nos 579.08
+      1 LL149 HINO MANIFOLD SET OF 6 ( 84841090 5 NOS 102.00 NOS 510.00
+    """
+    items: list[dict[str, str]] = []
+    by_sl: dict[int, dict[str, str]] = {}
+    # With GST% before qty (MB)
+    row_gst = re.compile(
+        r"^\s*(?P<sl>\d{1,3})\s+"
+        r"(?P<head>.+?)\s+"
+        r"(?P<hsn>\d{8})\s+"
+        r"(?P<gst>\d{1,2})\s*%\s+"
+        r"(?P<qty>\d+(?:[.,]\d+)?)\s*"
+        r"(?P<unit>nos|NOS|Pcs|PCS)?\s+"
+        r"(?P<rate>[\d,]+\.\d{2})\s+"
+        r"(?:nos|NOS|Pcs|PCS)?\s*"
+        r"(?P<amount>[\d,]+\.\d{2})\s*$",
+        re.I,
+    )
+    # With disc% before amount (HEMA)
+    row_disc = re.compile(
+        r"^\s*(?P<sl>\d{1,3})\s+"
+        r"(?P<head>.+?)\s+"
+        r"(?P<hsn>\d{8})\s+"
+        r"(?P<qty>\d+(?:[.,]\d+)?)\s*"
+        r"(?P<unit>NOS|Nos|PCS)?\s+"
+        r"(?P<rate>[\d,]+\.\d{2})\s+"
+        r"(?:NOS|Nos|PCS)?\s+"
+        r"(?P<disc>\d{1,2}(?:\.\d{1,2})?)\s*%?\s+"
+        r"(?P<amount>[\d,]+\.\d{2})\s*$",
+        re.I,
+    )
+    # Plain qty rate amount (PR Process)
+    row_plain = re.compile(
+        r"^\s*(?P<sl>\d{1,3})\s+"
+        r"(?P<head>.+?)\s+"
+        r"(?P<hsn>\d{8})\s+"
+        r"(?P<qty>\d+(?:[.,]\d+)?)\s*"
+        r"(?P<unit>NOS|Nos|PCS)?\s+"
+        r"(?P<rate>[\d,]+\.\d{2})\s+"
+        r"(?:NOS|Nos|PCS)?\s+"
+        r"(?P<amount>[\d,]+\.\d{2})\s*$",
+        re.I,
+    )
+
+    def _split_head(head: str) -> tuple[str, str]:
+        head = _clean(head)
+        # VT 1203001(desc...) or LX 3630KIT(KFK...) or LL149 DESC
+        m = re.match(r"^([A-Z]{1,6}\s*\d{3,8}[A-Z0-9\-]*)\s*[\(\-]?\s*(.*)$", head, re.I)
+        if m and len(m.group(1)) >= 4:
+            part = re.sub(r"\s+", " ", m.group(1)).strip()
+            desc = m.group(2).strip(" ()-")
+            if not desc:
+                desc = part
+                # keep part from code before (
+                pm = re.match(r"^([A-Z0-9][A-Z0-9\- ]{2,})", head, re.I)
+                if pm:
+                    part = pm.group(1).split("(")[0].strip()
+            return part, desc or head
+        m = re.match(r"^([A-Z]{2,6}\d{2,5}[A-Z0-9]*)\s+(.+)$", head, re.I)
+        if m:
+            return m.group(1), m.group(2)
+        return "", head
+
+    for raw in text.splitlines():
+        ln = _clean(raw)
+        if not ln or STOP_ITEM.search(ln):
+            continue
+        m = row_gst.match(ln) or row_disc.match(ln) or row_plain.match(ln)
+        if not m:
+            continue
+        sl = int(m.group("sl"))
+        part, desc = _split_head(m.group("head"))
+        unit = (m.group("unit") or "").strip()
+        by_sl[sl] = {
+            "part_number": part,
+            "description": desc,
+            "hsn_sac": m.group("hsn"),
+            "qty": f"{m.group('qty')} {unit}".strip(),
+            "mrp": "",
+            "rate": m.group("rate"),
+            "amount": m.group("amount"),
+        }
+    return [by_sl[k] for k in sorted(by_sl)]
+
+
+def parse_anbu_part_hsn_net(text: str) -> list[dict[str, str]]:
+    """
+    S.No Part Desc HSN Qty Rate Tax% NetRate Amount
+      1 TX55 TPH TEXSPIN 84828000 3 734.48 18 866.69 2600.06
+    Rate = taxable unit; NetRate is GST-inclusive (ignore for Rate column).
+    """
+    items: list[dict[str, str]] = []
+    row = re.compile(
+        r"^\s*(?P<sl>\d{1,3})\s+"
+        r"(?P<part>[A-Z0-9][A-Z0-9\-]{1,})\s+"
+        r"(?P<desc>[A-Za-z][A-Za-z0-9 \/\.\-]{1,}?)\s+"
+        r"(?P<hsn>\d{4,8})\s+"
+        r"(?P<qty>\d+(?:[.,]\d+)?)\s+"
+        r"(?P<rate>[\d,]+\.\d{2})\s+"
+        r"(?P<tax>\d{1,2})\s+"
+        r"(?P<net>[\d,]+\.\d{2})\s+"
+        r"(?P<amount>[\d,]+\.\d{2})\s*$",
+        re.I,
+    )
+    for raw in text.splitlines():
+        ln = _clean(raw)
+        if not ln or STOP_ITEM.search(ln):
+            continue
+        m = row.match(ln)
+        if not m:
+            continue
+        items.append(
+            {
+                "part_number": m.group("part"),
+                "description": _clean(m.group("desc")),
+                "hsn_sac": m.group("hsn"),
+                "qty": m.group("qty"),
+                "mrp": "",
+                "rate": m.group("rate"),
+                "amount": m.group("amount"),
+            }
+        )
+    return _dedupe_items(items)
+
+
+def parse_anamallais_part_above_si(text: str) -> list[dict[str, str]]:
+    """
+    Dealer invoices where Part No sits on the line above S.No, HSN is OCR-split:
+      IA202777
+      1 (8708700 LOCK NUT, WHEEL BEARING/(A) NOS 730.00 2.00 618.65 14.00 -86.61 532.04 1,064.08
+      0)
+    Stop at Spare Parts Total / HSN Code Summary (do not ingest tax-summary rows).
+    """
+    if not re.search(
+        r"(?i)Part\s*No.*HSN|Loyalty\s*Point|Spare\s*Parts\s*Total|Receiver\s*GST",
+        text[:3500],
+    ):
+        return []
+    if not re.search(r"(?i)\bS\.?\s*No\b", text[:3500]):
+        return []
+
+    lines = [_clean(ln) for ln in text.splitlines()]
+    # Cut before HSN summary / loyalty / totals that pollute parsers
+    cut = len(lines)
+    for i, ln in enumerate(lines):
+        if re.search(
+            r"(?i)^(?:Spare\s*Parts\s*Total|HSN\s*Code\s*Summary|Loyalty\s*Point|"
+            r"Part\s*Taxable|Central\s*GST|Gross\s*Total|Total\s*Invoice)\b",
+            ln,
+        ):
+            cut = i
+            break
+    lines = lines[:cut]
+
+    part_only = re.compile(r"^[A-Z]{1,4}\d{4,10}[A-Z0-9]*$")
+    # Trailing money: disc_amt, net, amount — space optional between disc/net when OCR glues
+    # e.g. "-86.61 532.04 1,064.08" or "-1,086.196,672.28 6,672.28"
+    row = re.compile(
+        r"^\s*(?P<sl>\d{1,2})\s+"
+        r"(?P<head>.+?)\s+"
+        r"(?P<uom>NOS|PCS|SET|PKT)\s+"
+        r"(?P<mrp>[\d,]+\.\d{2})\s+"
+        r"(?P<qty>[\d,]+\.\d{2})\s+"
+        r"(?P<rate>[\d,]+\.\d{2})\s+"
+        r"(?P<disc>\d{1,2}(?:\.\d{1,2})?)\s+"
+        r"(?P<discamt>-?[\d,]+\.\d{2})\s*"
+        r"(?P<net>[\d,]+\.\d{2})\s+"
+        r"(?P<amount>[\d,]+\.\d{2})\s*$",
+        re.I,
+    )
+    hsn_frag = re.compile(r"^\(?\s*(?P<a>\d{4,8})\)?\s*$|^(?P<b>\d{1,4})\)\s*$")
+
+    items: list[dict[str, str]] = []
+    by_sl: dict[int, dict[str, str]] = {}
+    pending_part = ""
+    pending_desc_bits: list[str] = []
+
+    for i, ln in enumerate(lines):
+        if not ln:
+            continue
+        if part_only.match(ln):
+            pending_part = ln
+            pending_desc_bits = []
+            continue
+        # Description wrap between part and SI row
+        if pending_part and not re.match(r"^\d{1,2}\s", ln) and not part_only.match(ln):
+            if not re.search(r"(?i)^SO\s*Number|^Anamallais|^Ph:|^Coimbatore", ln):
+                if re.search(r"[A-Za-z]{3,}", ln) and not hsn_frag.match(ln):
+                    pending_desc_bits.append(ln)
+            continue
+
+        m = row.match(ln)
+        if not m:
+            continue
+        try:
+            sl = int(m.group("sl"))
+        except Exception:
+            continue
+        if sl < 1 or sl > 80:
+            continue
+
+        head = m.group("head")
+        # HSN is usually inside "(8708700" — leading digit before "(" is OCR junk from wrap
+        hm = re.search(r"\((\d{4,8})", head)
+        if not hm:
+            hm = re.search(r"(\d{4,8})", head)
+        hsn = hm.group(1) if hm else ""
+        # Look ahead for closing ")0)" / "00)" / "11)" fragments
+        for j in range(i + 1, min(i + 4, len(lines))):
+            nxt = lines[j]
+            frag_m = re.match(r"^\(?\s*(\d{1,4})\)?\s*$", nxt)
+            if not frag_m:
+                if part_only.match(nxt) or row.match(nxt):
+                    break
+                # Skip "(A)" / description remnants
+                if re.search(r"[A-Za-z]", nxt):
+                    continue
+                break
+            frag = frag_m.group(1)
+            if frag and len(hsn) < 8:
+                hsn = (hsn + frag)[:8]
+            if len(hsn) >= 8:
+                break
+        if len(hsn) > 8:
+            hsn = hsn[-8:]
+
+        desc = head
+        # Strip leading OCR-split HSN only — do NOT strip through any ")" (desc may contain /(A))
+        desc = re.sub(r"^\d?\(\d{4,8}\s*", "", desc)
+        desc = re.sub(r"^\(\d{4,8}\s*", "", desc)
+        desc = re.sub(r"^\d{4,8}\s+", "", desc)
+        desc = re.sub(r"/\(A\)\s*$", "", desc)
+        desc = re.sub(r"\(A\)\s*$", "", desc)
+        desc = desc.strip(" ,/-")
+        if pending_desc_bits:
+            wrapped = _clean(" ".join(pending_desc_bits))
+            desc = _clean(f"{wrapped} {desc}".strip()) if desc else wrapped
+        # Drop leaked HSN digit runs / repeated part at start of description
+        desc = re.sub(r"^\d{4,8}\s+", "", desc)
+
+        part = pending_part
+        if part and desc.upper().startswith(part.upper()):
+            desc = desc[len(part) :].lstrip(", ").strip()
+        if not part:
+            pm = re.match(r"^([A-Z]{1,4}\d{4,10})\s*[, ]", desc)
+            if pm:
+                part = pm.group(1)
+                desc = desc[pm.end() :].lstrip(", ").strip()
+        elif desc.upper().startswith(part.upper() + ","):
+            desc = desc[len(part) :].lstrip(", ").strip()
+
+        qty = m.group("qty")
+        try:
+            qf = float(qty.replace(",", ""))
+            qty = str(int(qf)) if abs(qf - round(qf)) < 0.01 else qty
+        except Exception:
+            pass
+        unit = m.group("uom")
+        item = {
+            "part_number": part,
+            "description": desc or part or "Item",
+            "hsn_sac": hsn if len(hsn) >= 4 else "",
+            "qty": f"{qty} {unit}".strip(),
+            "mrp": m.group("mrp"),
+            "rate": m.group("rate"),
+            "amount": m.group("amount"),
+        }
+        by_sl[sl] = item
+        pending_part = ""
+        pending_desc_bits = []
+
+    for sl in sorted(by_sl):
+        items.append(by_sl[sl])
+    return items
+
+
+def parse_lubricant_mrp_qty_rate(text: str) -> list[dict[str, str]]:
+    """
+    Arvind Petroleums / Shell lubricant lines (desc sometimes OCR-dropped):
+      1550070727 RIMULA R4 27101972 2,707.62 112.500 Ltr\\Kg 15 Nos 2,707.62 Nos 40,614.30
+      2550039995 27101980 1,796.61 15.000 Ltr\\Kg 1-0.0000 Ctn 1,796.61 Pcs 5,389.83
+      3550040915-RimR415W40 27101980 3,440.67 50.000 Ltr\\Kg 5.0000 Pcs 3,440.67 Pcs 17,203.35
+    """
+    if not re.search(r"(?i)RIMULA|Ltr\\\\?Kg|Ltr/Kg|Description of Goods", text):
+        return []
+    items: list[dict[str, str]] = []
+    # Qty forms: "15 Nos", "5.0000 Pcs", "1-0.0000 Ctn" (leading int is qty)
+    row = re.compile(
+        r"(?P<part>\d{7,12})(?:-(?P<pdesc>[A-Za-z0-9_]+))?\s+"
+        r"(?:(?P<desc>[A-Za-z][A-Za-z0-9 \\/\.\-]{1,}?)\s+)?"
+        r"(?P<hsn>\d{8})\s+"
+        r"(?P<rate>[\d,]+\.\d{2})\s+"
+        r"[\d,]+\.\d{3}\s+\S+\s+"
+        r"(?P<qty>\d+(?:\.\d+)?)(?:-\d+(?:\.\d+)?)?\s*"
+        r"(?P<unit>Nos|Pcs|Ctn|PCS)\s+"
+        r"[\d,]+\.\d{2}\s+\S+\s+"
+        r"(?P<amount>[\d,]+\.\d{2})",
+        re.I,
+    )
+    lines = text.splitlines()
+    for i, raw in enumerate(lines):
+        ln = _clean(raw)
+        if not ln or STOP_ITEM.search(ln):
+            continue
+        m = row.search(ln)
+        if not m:
+            continue
+        qty = m.group("qty")
+        try:
+            qf = float(qty)
+            qty = str(int(round(qf))) if abs(qf - round(qf)) < 0.01 else qty
+        except Exception:
+            qty = m.group("qty").split("-")[0]
+        mrp = ""
+        for j in range(i + 1, min(i + 4, len(lines))):
+            mm = re.search(r"(?i)\bMRP\s*([\d,]+)", lines[j])
+            if mm:
+                mrp = mm.group(1)
+                if "." not in mrp:
+                    mrp = f"{mrp}.00"
+                break
+        # Description often continues on next line(s) before MRP
+        desc = _clean(m.group("desc") or m.group("pdesc") or "")
+        if not desc or len(desc) < 4:
+            bits: list[str] = []
+            for j in range(i + 1, min(i + 4, len(lines))):
+                nxt = _clean(lines[j])
+                if not nxt or re.search(r"(?i)^MRP\b|^\d{7,12}\b|^CGST|^SGST|^Total\b", nxt):
+                    break
+                if re.match(r"^[\d,]+\.\d{2}$", nxt):
+                    break
+                # Drop leading bullets / OCR junk; strip trailing MRP token if glued
+                bit = re.sub(r"(?i)\s*MRP\s*[\d,]+\s*$", "", nxt.lstrip("-*").strip())
+                if bit:
+                    bits.append(bit)
+            if bits:
+                desc = _clean(" ".join(bits))
+        unit = (m.group("unit") or "").strip()
+        items.append(
+            {
+                "part_number": m.group("part"),
+                "description": desc or m.group("part"),
+                "hsn_sac": m.group("hsn"),
+                "qty": f"{qty} {unit}".strip(),
+                "mrp": mrp,
+                "rate": m.group("rate"),
+                "amount": m.group("amount"),
+            }
+        )
+    return _dedupe_items(items)
+
+
+
 def parse_line_items(text: str) -> list[dict[str, str]]:
     """
     Layout-first: detect column schema, prefer matching parsers, gate MRP repair.
@@ -1803,16 +2395,21 @@ def parse_line_items(text: str) -> list[dict[str, str]]:
 
     preferred_fns: dict[str, list] = {
         "mrp_disc": [
+            parse_anamallais_part_above_si,
+            parse_lubricant_mrp_qty_rate,
             parse_part_mrp_disc_tax_amount,
             parse_mrp_rate_items,
             parse_part_hsn_qty_rate,
         ],
         "mrp_rate": [
+            parse_anamallais_part_above_si,
             parse_mrp_rate_items,
             parse_part_mrp_disc_tax_amount,
             parse_part_hsn_qty_rate,
         ],
         "credit_rate_qty": [
+            parse_sno_part_particulars_gst,
+            parse_sno_part_desc_discounts,
             parse_credit_bill_hsn_rate_qty,
             parse_part_hsn_qty_rate,
             parse_part_column_items,
@@ -1823,14 +2420,32 @@ def parse_line_items(text: str) -> list[dict[str, str]]:
             parse_amount_trail_items,
         ],
         "einvoice": [
+            parse_sno_part_particulars_gst,
+            parse_desc_part_brand_hsn,
+            parse_anbu_part_hsn_net,
+            parse_sno_part_desc_discounts,
+            parse_goods_hsn_qty_rate_disc,
             parse_einvoice_line_items,
             parse_part_hsn_qty_rate,
             lambda t: parse_tally_scan_items(t, hsn_digits=8),
         ],
-        "unknown": [],
+        "unknown": [
+            parse_anamallais_part_above_si,
+            parse_goods_hsn_qty_rate_disc,
+            parse_sno_part_particulars_gst,
+            parse_desc_part_brand_hsn,
+            parse_lubricant_mrp_qty_rate,
+        ],
     }
 
     fallback_fns = [
+        parse_anamallais_part_above_si,
+        parse_sno_part_particulars_gst,
+        parse_desc_part_brand_hsn,
+        parse_sno_part_desc_discounts,
+        parse_goods_hsn_qty_rate_disc,
+        parse_anbu_part_hsn_net,
+        parse_lubricant_mrp_qty_rate,
         parse_item_code_particulars,
         parse_part_mrp_disc_tax_amount,
         parse_s_code_nos_items,
@@ -1861,6 +2476,7 @@ def parse_line_items(text: str) -> list[dict[str, str]]:
 
     def _quality(items: list[dict[str, str]]) -> tuple:
         usable = []
+        parts = 0
         for it in items:
             desc = re.sub(r"[^A-Za-z]", "", str(it.get("description") or ""))
             part = str(it.get("part_number") or "")
@@ -1881,8 +2497,16 @@ def parse_line_items(text: str) -> list[dict[str, str]]:
                 continue
             if re.fullmatch(r"\d+\.\d{2}", qty_tok) and qty_v >= 20:
                 continue
+            if part.strip():
+                parts += 1
             usable.append(it)
-        return (_item_score(usable, schema), len(usable), _item_score(items, schema))
+        # Prefer filled Part Number rows strongly (stop ghost/HSN-summary winners)
+        return (
+            parts * 5 + _item_score(usable, schema),
+            parts,
+            len(usable),
+            _item_score(items, schema),
+        )
 
     best = max(candidates, key=_quality)
     cleaned = []

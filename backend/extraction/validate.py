@@ -80,6 +80,25 @@ def strip_part_from_description(it: dict[str, str]) -> dict[str, str]:
             desc = m.group(2).strip()
             it["part_number"] = part
             it["description"] = desc
+        else:
+            # VT 1203001(Elec Oil...) or LX 3630KIT(KFK...)
+            m = re.match(
+                r"^([A-Z]{1,6}\s*\d{3,8}[A-Z0-9\-]*)\s*[\(]\s*(.+)$",
+                desc,
+                re.I,
+            )
+            if m:
+                part = re.sub(r"\s+", " ", m.group(1)).strip()
+                desc = m.group(2).rstrip(")").strip()
+                it["part_number"] = part
+                it["description"] = desc
+            else:
+                m = re.match(r"^([A-Z]{2,6}\d{2,5}[A-Z0-9]*)\s+(.+)$", desc, re.I)
+                if m:
+                    part = m.group(1)
+                    desc = m.group(2).strip()
+                    it["part_number"] = part
+                    it["description"] = desc
 
     if not part or not desc:
         return it

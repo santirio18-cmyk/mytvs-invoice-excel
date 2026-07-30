@@ -52,11 +52,21 @@ def detect_table_layout(text: str) -> LayoutSchema:
     has_qty = bool(re.search(r"(?i)\bqty\b|\bquantity\b", hdr))
     has_hsn = bool(re.search(r"(?i)\bhsn\b", hdr))
     has_sno = bool(re.search(r"(?i)\b(?:s\.?\s*no|sl\.?\s*no|sr\.?\s*no)\b", hdr))
-    has_part = bool(re.search(r"(?i)\bpart\s*(?:no|number|#|code)?\b", hdr))
+    has_part = bool(re.search(r"(?i)\bpart\s*(?:no|number|#|code)?\b|PARTNO", hdr))
+    has_brand = bool(re.search(r"(?i)\bbrand\b", hdr))
+    has_gstr = bool(re.search(r"(?i)gstr\s*%|gst\s*%", hdr))
 
     # Karnavati / ZipERP style
     if has_item_code and has_particulars:
         return "item_code"
+
+    # PART No + PARTICULARS + GSTR% (ALA / Autolight Coimbatore) — treat as einvoice family
+    if has_part and has_particulars and has_hsn:
+        return "einvoice"
+
+    # DESCRIPTION + PARTNO + BRAND (Karpagam)
+    if has_brand and has_part and has_hsn:
+        return "einvoice"
 
     # Ashok: Qty MRP Dis% Tax% Amount
     if has_mrp and has_disc:
