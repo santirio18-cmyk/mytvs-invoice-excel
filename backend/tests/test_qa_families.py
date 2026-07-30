@@ -290,6 +290,40 @@ def test_qa_pdf_pack_if_present():
         assert not str(out.get("supplier_name", "")).startswith("(")
 
 
+def test_no_mid_pattern_global_flags():
+    """Python 3.11+ rejects (?i) after | — this crashed 279 (1).pdf on Railway."""
+    import re
+    import warnings
+
+    # Mimic 3.11 hard-fail: treat the deprecation as an error locally too.
+    warnings.filterwarnings("error", message="Flags not at the start")
+    sample = (
+        "TAX INVOICE\nAmount Chargeable\nHSN / SAC\n"
+        "TW41280 - Tata Belt 40103999 2Nos Rs. 471.00\n"
+        "Total) 2Nos Rs. 471.00\n"
+    )
+    # Must not raise re.error / Flags-not-at-start
+    items = parse_line_items(sample)
+    assert isinstance(items, list)
+    # Direct compile of the fixed grand-total pattern
+    pat = (
+        r"(?i)(?:Total|Rs\.?)\s*[^\n]{0,12}?(?:Rs\.?\s*)?([\d,]+\.\d{2})\s*$|"
+        r"Rs\.?\s*([\d,]+\.\d{2})\s*(?:E\s*&?\s*O\s*E|Amount Chargeable)"
+    )
+    re.compile(pat, re.M)
+
+
+def test_thangam_279_if_present():
+    pdf = Path(__file__).resolve().parents[2] / "samples/279.pdf"
+    if not pdf.exists():
+        return
+    out = extract_invoice(pdf.read_bytes(), "279.pdf")
+    items = out.get("line_items") or []
+    assert len(items) >= 20, f"279.pdf: only {len(items)} lines"
+    assert "279" in str(out.get("invoice_number") or "")
+    assert "THANGAM" in str(out.get("supplier_name") or "").upper()
+
+
 def test_web_style_twins_if_present():
     root = Path(__file__).resolve().parents[2] / "samples/web-tests"
     checks = {

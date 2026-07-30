@@ -36,7 +36,7 @@ CORS_ORIGINS = [o.strip() for o in _cors.split(",") if o.strip()] or ["*"]
 
 app = FastAPI(title="myTVS — Invoice to Excel", version="2.0.0")
 
-DEPLOY_MARK = "2026-07-30-vlsi-impal"
+DEPLOY_MARK = "2026-07-30-re-flags-279"
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -2860,9 +2860,11 @@ def parse_tally_phone_goods_line(text: str) -> list[dict[str, str]]:
 
     # Anchor taxable to Grand Total / 1.18 when present (phone OCR invents 100.65 / 300.50)
     grand = None
+    # Single leading (?i) — a second (?i) after | is illegal on Python 3.11+
+    # ("global flags not at the start of the expression at position 67").
     gm = re.search(
         r"(?i)(?:Total|Rs\.?)\s*[^\n]{0,12}?(?:Rs\.?\s*)?([\d,]+\.\d{2})\s*$|"
-        r"(?i)Rs\.?\s*([\d,]+\.\d{2})\s*(?:E\s*&?\s*O\s*E|Amount Chargeable)",
+        r"Rs\.?\s*([\d,]+\.\d{2})\s*(?:E\s*&?\s*O\s*E|Amount Chargeable)",
         text,
         re.M,
     )
@@ -3194,7 +3196,17 @@ def parse_line_items(text: str) -> list[dict[str, str]]:
         seen_names.add(key)
         ordered_fns.append(fn)
 
-    candidates = [fn(text) for fn in ordered_fns]
+    # Never let one parser's regex/runtime error abort the whole invoice
+    # (Python 3.11+ raises on mid-pattern (?i); OCR can also trip edge cases).
+    candidates: list[list[dict[str, str]]] = []
+    for fn in ordered_fns:
+        try:
+            candidates.append(fn(text) or [])
+        except re.error:
+            candidates.append([])
+        except Exception:
+            candidates.append([])
+
 
     def _quality(items: list[dict[str, str]]) -> tuple:
         usable = []
