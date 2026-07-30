@@ -114,6 +114,9 @@ def repair_qty_mrp_shift(items: list[dict[str, str]], text: str = "") -> list[di
       qty=364.00 (actually MRP), rate empty/wrong
       qty=292 Nos (truncated MRP), rate≈0
       qty=30.00 (Dis%), rate=364.00 (actually MRP)
+
+    Must NOT touch balanced CREDIT BILL / Padmavathi rows where Qty×Rate≈Amount
+    (those put Rate into MRP and invent a fake discount).
     """
     has_mrp_hdr = bool(re.search(r"(?i)\bmrp\b", (text or "")[:2000]))
     fixed: list[dict[str, str]] = []
@@ -141,7 +144,27 @@ def repair_qty_mrp_shift(items: list[dict[str, str]], text: str = "") -> list[di
                 return True
             return False
 
+        # Already a clean Qty × Rate ≈ Amount line — do not invent MRP/discount
+        # (Sri Padmavathi / SPAC credit bills: Qty 3.00 · Rate 247.00 · Amount 741.00)
+        line_balanced = (
+            qty_v is not None
+            and rate_v is not None
+            and amt_v is not None
+            and qty_v > 0
+            and abs(qty_v * rate_v - amt_v) <= max(0.51, 0.02 * amt_v)
+        )
+        if line_balanced and (not mrp_v or abs((mrp_v or 0) - rate_v) < 0.01):
+            # Keep integer qty when whole; clear fake MRP==Rate copy
+            if qty_v == int(qty_v):
+                unit = " ".join(qty_s.split()[1:]) if qty_s.split()[1:] else ""
+                it["qty"] = f"{int(qty_v)} {unit}".strip()
+            if mrp_v and abs(mrp_v - rate_v) < 0.01 and not has_mrp_hdr:
+                it["mrp"] = ""
+            fixed.append(it)
+            continue
+
         # C first: Dis% in Qty, MRP in Rate (xx.00 ≤100 is discount, not MRP)
+        # Only when Qty×Rate does NOT already explain Amount.
         if (
             not mrp_v
             and qty_v is not None
@@ -151,6 +174,7 @@ def repair_qty_mrp_shift(items: list[dict[str, str]], text: str = "") -> list[di
             and re.search(r"\.\d{2}", qty_tok or "")
             and rate_v >= 50
             and amt_v > rate_v * 0.15
+            and abs(qty_v * rate_v - amt_v) > max(1.0, 0.05 * amt_v)
         ):
             disc = qty_v
             it["mrp"] = rate_s

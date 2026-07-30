@@ -36,7 +36,7 @@ CORS_ORIGINS = [o.strip() for o in _cors.split(",") if o.strip()] or ["*"]
 
 app = FastAPI(title="myTVS — Invoice to Excel", version="2.0.0")
 
-DEPLOY_MARK = "2026-07-29-karnavati-itemcode-r2"
+DEPLOY_MARK = "2026-07-30-padmavathi-mrp"
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -457,7 +457,7 @@ def find_supplier(text: str) -> str:
         r"(?i)^[\(\[]?\s*(tax\s*invoice|taxinvoice|auto\s*taxinvoice|original|duplicate|page|"
         r"gstin|state|e-?mail|contact|phone|invoice|dated|bill\s*to|buyer|consignee|ship|"
         r"delivery|reference|dlr|sap|irn|ack\s*no|payment|to\.|e-?invoice|item\s*name|thanks|"
-        r"transport|banks?\s*details|hsn|terms)",
+        r"transport|banks?\s*details|hsn|terms|credit\s*bill|debit\s*bill)$",
     )
     company_word = re.compile(
         r"(?i)\b(AGENCY|AGENCIES|MOTORS|AUTO|PRIVATE|LIMITED|PVT|TRADERS|ENTERPRISES|"
@@ -854,12 +854,18 @@ def parse_credit_bill_hsn_rate_qty(text: str) -> list[dict[str, str]]:
         # Sanity: qty should be a real quantity, not another HSN
         if re.fullmatch(r"\d{4,8}", qty) and not unit:
             continue
+        try:
+            qn = float(qty.replace(",", ""))
+            qty_out = str(int(qn)) if qn == int(qn) else qty
+        except Exception:
+            qty_out = qty
         items.append(
             {
                 "part_number": m.group("part"),
                 "description": _clean(m.group("desc")),
                 "hsn_sac": m.group("hsn"),
-                "qty": f"{qty} {unit}".strip(),
+                "qty": f"{qty_out} {unit}".strip(),
+                "mrp": "",  # credit bills: Rate is selling price, not MRP
                 "rate": rate,
                 "amount": amount,
             }
