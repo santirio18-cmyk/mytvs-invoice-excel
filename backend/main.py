@@ -36,7 +36,7 @@ CORS_ORIGINS = [o.strip() for o in _cors.split(",") if o.strip()] or ["*"]
 
 app = FastAPI(title="myTVS — Invoice to Excel", version="2.0.0")
 
-DEPLOY_MARK = "2026-07-30-scan1"
+DEPLOY_MARK = "2026-07-30-phone-tally"
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -68,6 +68,8 @@ def _normalize_supplier_ocr(name: str) -> str:
     name = re.sub(r"(?i)^[A4]UTOLIGH\w*", "AUTOLIGHT", name)
     name = re.sub(r"(?i)^[AR]?UTOONE\b", "AUTOONE", name)
     name = re.sub(r"(?i)^ANGAM\b", "THANGAM", name)
+    name = re.sub(r"(?i)\bSRI[Il1]\s+KUMARAN\b", "SRII KUMARAN", name)
+    name = re.sub(r"(?i)^SRI[Il1]\b", "SRII", name)
     # OCR leftover after brand: "AUTOLIGHT: A"
     name = re.sub(r":\s*[A-Z]?\s*$", "", name)
     name = re.sub(r"\s+", " ", name).strip(" -|,:;")
@@ -336,12 +338,22 @@ def find_invoice_number(text: str) -> str:
             r"(?:[^\nA-Z0-9]{0,20})?([A-Z0-9][A-Z0-9\/\-]{1,})",
             re.I,
         ),
+        # Phone OCR: "Invoice No" on one line, "J3398 29-Jul-26" on next / same blob
+        re.compile(
+            r"Inv[a-z]{0,6}\s*No\.?[^\n]{0,40}?\b([A-Z]\d{3,6})\b",
+            re.I | re.S,
+        ),
         re.compile(r"(?:Inv|te)\s*No\.?\s*[:\-]?\s*([A-Z0-9][A-Z0-9\/\-]{1,})", re.I),  # OCR: teNo.
         # Handwritten / sparse: Invoice No | 160
         re.compile(r"Inv[a-z]{0,6}\s*No\.?\s*[|:.\- ]+\s*(\d{2,6})\b", re.I),
         # ZipERP / Karnavati: "Order No. : Dated :" then "... MADURAI 000089 29/07/2026"
         re.compile(
             r"Order\s*No\.?\s*[:\-]?[^\n]{0,60}\n[^\n]*?\b(\d{4,8})\b\s+\d{1,2}/\d{1,2}/\d{2,4}",
+            re.I,
+        ),
+        # Bare J3398 / A1024 near dated month
+        re.compile(
+            r"\b([A-Z]\d{3,6})\b\s+\d{1,2}[-/\s]*(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)",
             re.I,
         ),
     ):
@@ -492,12 +504,14 @@ def find_supplier(text: str) -> str:
     )
     company_word = re.compile(
         r"(?i)\b(AGENCY|AGENCIES|MOTORS|AUTO|PRIVATE|LIMITED|PVT|TRADERS|ENTERPRISES|"
-        r"SERVICE|SOLUTIONS|INDUSTRIES|CORPORATION|COMPANY|DEALER|LIGHT|COVERS|GEAR|"
+        r"ENTERPRISE|SERVICE|SOLUTIONS|INDUSTRIES|CORPORATION|COMPANY|DEALER|LIGHT|COVERS|GEAR|"
         r"PRODUCTZ|PRODUCTS|BEARINGS|PETROLEUMS|PROCESS|STORES|STORE)\b",
     )
     address_like = re.compile(
-        r"(?i)^\d+[A-Z]?\s*,|\b(?:street|road|nagar|colony|estate|floor|gate|padithurai)\b|"
-        r"^\d{1,4}[,\-]|pin\s*code|madurai$|salem$|coimbatore$",
+        r"(?i)^\d+[A-Z]?\s*,|\b(?:street|road|nagar|colony|estate|floor|gate|padithurai|"
+        r"basement|veli|towers?)\b|"
+        r"^\d{1,4}[,\-]|pin\s*code|madurai$|salem$|coimbatore$|"
+        r"^[A-Z]{3,12}-\d{4,6}$",  # MADURAI-6250 city-PIN OCR junk
     )
 
     scored: list[tuple[int, str]] = []
@@ -510,12 +524,16 @@ def find_supplier(text: str) -> str:
             continue
         if re.search(r"\d{6}\s*$", ln) and not company_word.search(ln):
             continue
+        if re.fullmatch(r"(?i)[A-Z]{3,12}-\d{3,6}", _clean(ln)):
+            continue  # MADURAI-6250
         cand = re.split(r"\s{2,}|GSTIN|NO\.?\d", ln, flags=re.I)[0].strip()
         cand = re.split(r"(?i)\s+(?:invoice|fivoes|tie:|dated|gstin|sstin)", cand)[0].strip()
         # Strip Tally-style " - (from 1-Apr-25)" fiscal tags
         cand = re.sub(r"\s*[-–]?\s*\(from\s+[^)]+\)\s*$", "", cand, flags=re.I).strip()
         cand = _normalize_supplier_ocr(cand)
         if not cand:
+            continue
+        if re.fullmatch(r"(?i)[A-Z]{3,12}-\d{3,6}", cand):
             continue
         if re.search(r"\d{2}-\d{2}-[A-Z]+-\d+", cand):
             continue
@@ -528,19 +546,21 @@ def find_supplier(text: str) -> str:
             score += 2
         if i < 8:
             score += 2
-        if re.match(r"(?i)^autolight\b|^a\.\s*l\.\s*a\.|^anbu\b|^arvind\b|^hema\b|^ask\b", cand):
+        if re.match(r"(?i)^autolight\b|^a\.\s*l\.\s*a\.|^anbu\b|^arvind\b|^hema\b|^ask\b|^srii?\b", cand):
             score += 6
         if re.search(
-            r"(?i)\b(agenc(?:y|ies)|motors|traders|enterprises|productz|bearings|"
+            r"(?i)\b(agenc(?:y|ies)|motors|traders|enterprises?|productz|bearings|"
             r"petroleums|process|stores?)\b",
             cand,
         ):
             score += 3
-        if re.search(r"(?i)\b(TVS AUTOMOBILE SOLUTIONS|TVS\s+SMART|BILL TO|BUYER)\b", cand):
-            score -= 4
-        if re.search(r"(?i)\balagu\b|\bashok\s*agenc|\banamallais\b", cand):
+        if re.search(r"(?i)\benterprise\b", cand):
             score += 4
-        if re.search(r"(?i)mahindra\s*bank|website|wob\s*sita|tamil\s*nady", cand):
+        if re.search(r"(?i)\b(TVS AUTOMOBILE SOLUTIONS|TVS\s+SMART|BILL TO|BUYER|MANICKAM)\b", cand):
+            score -= 4
+        if re.search(r"(?i)\balagu\b|\bashok\s*agenc|\banamallais\b|\bkumaran\b", cand):
+            score += 4
+        if re.search(r"(?i)mahindra\s*bank|website|wob\s*sita|tamil\s*nady|madurai-\d", cand):
             score -= 5
         if address_like.search(cand):
             score -= 4
@@ -2104,9 +2124,12 @@ def parse_desc_part_brand_hsn(text: str) -> list[dict[str, str]]:
         if idx > 0:
             desc = desc[:idx].strip()
         qty = "1"
-        qm = re.search(r"(?i)(?:\{|\b)(\d+)\s*A?NOS\b", ln)
+        qm = re.search(r"(?i)(?:\{|\b)(\d{1,4})\s*A?NOS\b", ln)
         if qm:
             qty = qm.group(1)
+            # Never treat HSN (8 digits) as qty
+            if len(qty) >= 6:
+                qty = "1"
         rate = mf.group("rate")
         amount = mf.group("amount")
         # Prefer amount that matches rate when qty=1 (OCR often duplicates)
@@ -2469,6 +2492,166 @@ def parse_anamallais_part_above_si(text: str) -> list[dict[str, str]]:
     return items
 
 
+def parse_tally_phone_goods_line(text: str) -> list[dict[str, str]]:
+    """
+    Phone photo of Tally tax invoice (creased paper + pen marks). OCR is noisy but
+    usually still has: part/desc, HSN, Nos, and HSN-summary taxable amount.
+      TW41280 - Tata 697 Belt ... 40103999 ... 2Nos ... 399.30
+    """
+    if not re.search(r"(?i)tax\s*invoice|amount\s*chargeable|HSN\s*/?\s*SAC", text[:2500]):
+        return []
+    items: list[dict[str, str]] = []
+
+    # HSN summary taxable — prefer larger values (line amount, not CGST 35.94)
+    taxable_candidates: list[tuple[str, float, str]] = []
+    for m in re.finditer(
+        r"\b(?P<hsn>\d{8})\b[^\n]{0,80}?(?P<taxable>[\d,]+\.\d{2})",
+        text,
+        re.I,
+    ):
+        hsn = m.group("hsn")
+        taxable = m.group("taxable")
+        try:
+            v = float(taxable.replace(",", ""))
+        except Exception:
+            continue
+        if v in {35.94, 71.88, 0.18} or v < 80:
+            continue
+        taxable_candidates.append((hsn, v, taxable))
+    taxable_by_hsn: dict[str, tuple[float, str]] = {}
+    for hsn, v, raw in taxable_candidates:
+        prev = taxable_by_hsn.get(hsn)
+        if not prev or v > prev[0]:
+            taxable_by_hsn[hsn] = (v, raw)
+
+    def _best_amount(hsn: str) -> tuple[str, str]:
+        """Return (hsn, amount) preferring summary taxable over mangled line OCR."""
+        # Prefer canonical HSN forms that appear cleanly in OCR (40103999 over 40103000)
+        votes: dict[str, int] = {}
+        for m in re.finditer(r"\b(40103\d{3}|87\d{6}|84\d{6}|73\d{6}|90\d{6})\b", text):
+            votes[m.group(1)] = votes.get(m.group(1), 0) + 1
+        family_hsns = [h for h in votes if h[:5] == hsn[:5] or h[:4] == hsn[:4]]
+        preferred_hsn = hsn
+        if family_hsns:
+            preferred_hsn = max(family_hsns, key=lambda h: (votes[h], h.endswith("999"), h))
+
+        if preferred_hsn in taxable_by_hsn and taxable_by_hsn[preferred_hsn][0] >= 150:
+            return preferred_hsn, taxable_by_hsn[preferred_hsn][1]
+        if hsn in taxable_by_hsn and taxable_by_hsn[hsn][0] >= 150:
+            return preferred_hsn if preferred_hsn else hsn, taxable_by_hsn[hsn][1]
+        family = [
+            (h, v, raw)
+            for h, (v, raw) in taxable_by_hsn.items()
+            if h[:5] == hsn[:5] or h[:4] == hsn[:4]
+        ]
+        if family:
+            h, v, raw = max(family, key=lambda t: t[1])
+            return preferred_hsn or h, raw
+        if taxable_by_hsn:
+            h, (v, raw) = max(taxable_by_hsn.items(), key=lambda kv: kv[1][0])
+            return preferred_hsn or h, raw
+        return preferred_hsn or hsn, ""
+
+    # Qty near grand total: "2Nos Rs. 471.00"
+    total_qty = ""
+    tq = re.search(r"(?i)\b(\d{1,3})\s*Nos\b[^\n]{0,20}?Rs\.?\s*([\d,]+\.\d{2})", text)
+    if tq:
+        total_qty = tq.group(1)
+
+    goods = re.compile(
+        r"(?P<part>TW\s*\d{3,5}|[A-Z]{1,3}\d{3,6})\s*[-–]\s*"
+        r"(?P<desc>[A-Za-z][A-Za-z0-9 \/&\-]{2,60}?)"
+        r"(?=\s+\d{4,}| \(|$)"
+        r".{0,50}?"
+        r"(?P<hsn>\d{8})"
+        r".{0,40}?"
+        r"(?P<qty>\d{1,3})\s*Nos",
+        re.I,
+    )
+
+    matched = False
+    for m in goods.finditer(text):
+        part = re.sub(r"\s+", "", m.group("part")).upper()
+        if part.startswith("TW") and len(part) >= 5:
+            # TW41280 is often OCR for TW 1280 (crease/pen)
+            digits = part[2:]
+            if len(digits) == 5 and digits[0] in "34":
+                part = f"TW {digits[1:]}"
+            else:
+                part = f"TW {digits}"
+        desc = _clean(m.group("desc"))
+        # Keep "Tata 697 Belt" — strip trailing junk codes
+        desc = re.sub(r"\s+\d{5,6}\s*$", "", desc).strip(" -\"'")
+        hsn = m.group("hsn")
+        hsn, amount = _best_amount(hsn)
+        qty = m.group("qty")
+        if total_qty and (qty in {"72", "12", "22", "32", "42"} or len(qty) > 1):
+            if total_qty.isdigit() and int(total_qty) <= 20:
+                qty = total_qty
+        if not amount:
+            continue
+        try:
+            qf = float(qty)
+            af = float(amount.replace(",", ""))
+            if qf <= 0 or af <= 0:
+                continue
+            rate = f"{af / qf:.2f}"
+            amount = f"{af:.2f}"
+        except Exception:
+            continue
+        items.append(
+            {
+                "part_number": part,
+                "description": desc or part,
+                "hsn_sac": hsn if len(hsn) == 8 else m.group("hsn"),
+                "qty": f"{qty} Nos",
+                "mrp": "",
+                "rate": rate,
+                "amount": amount,
+            }
+        )
+        matched = True
+        break
+
+    if not matched and taxable_by_hsn:
+        dm = re.search(
+            r"(?i)\b(TW\s*\d{3,5}|[A-Z]{2}\d{3,5})\s*[-–]\s*([A-Za-z][A-Za-z0-9 \/&\-]{3,40})",
+            text,
+        )
+        hsn, (_, amount) = max(taxable_by_hsn.items(), key=lambda kv: kv[1][0])
+        qty = total_qty or "1"
+        try:
+            rate = f"{float(amount.replace(',', '')) / float(qty):.2f}"
+        except Exception:
+            rate = amount
+        part = ""
+        desc = "Item"
+        if dm:
+            raw_part = re.sub(r"\s+", "", dm.group(1)).upper()
+            if raw_part.startswith("TW"):
+                digits = raw_part[2:]
+                if len(digits) == 5 and digits[0] in "34":
+                    part = f"TW {digits[1:]}"
+                else:
+                    part = f"TW {digits}"
+            else:
+                part = raw_part
+            desc = _clean(dm.group(2))
+            desc = re.sub(r"\s+\d{5,6}\s*$", "", desc).strip(" -\"'")
+        items.append(
+            {
+                "part_number": part,
+                "description": desc,
+                "hsn_sac": hsn,
+                "qty": f"{qty} Nos",
+                "mrp": "",
+                "rate": rate,
+                "amount": amount if "." in str(amount) else f"{float(str(amount).replace(',','')):.2f}",
+            }
+        )
+    return _dedupe_items(items)
+
+
 def parse_lubricant_mrp_qty_rate(text: str) -> list[dict[str, str]]:
     """
     Arvind Petroleums / Shell lubricant lines (desc sometimes OCR-dropped):
@@ -2558,6 +2741,7 @@ def parse_line_items(text: str) -> list[dict[str, str]]:
     preferred_fns: dict[str, list] = {
         "mrp_disc": [
             parse_anamallais_part_above_si,
+            parse_tally_phone_goods_line,
             parse_lubricant_mrp_qty_rate,
             parse_part_mrp_disc_tax_amount,
             parse_mrp_rate_items,
@@ -2565,6 +2749,7 @@ def parse_line_items(text: str) -> list[dict[str, str]]:
         ],
         "mrp_rate": [
             parse_anamallais_part_above_si,
+            parse_tally_phone_goods_line,
             parse_mrp_rate_items,
             parse_part_mrp_disc_tax_amount,
             parse_part_hsn_qty_rate,
@@ -2584,6 +2769,7 @@ def parse_line_items(text: str) -> list[dict[str, str]]:
         "einvoice": [
             parse_sno_part_particulars_gst,
             parse_desc_part_brand_hsn,
+            parse_tally_phone_goods_line,
             parse_anbu_part_hsn_net,
             parse_sno_part_desc_discounts,
             parse_goods_hsn_qty_rate_disc,
@@ -2593,6 +2779,7 @@ def parse_line_items(text: str) -> list[dict[str, str]]:
         ],
         "unknown": [
             parse_anamallais_part_above_si,
+            parse_tally_phone_goods_line,
             parse_goods_hsn_qty_rate_disc,
             parse_sno_part_particulars_gst,
             parse_desc_part_brand_hsn,
@@ -2602,6 +2789,7 @@ def parse_line_items(text: str) -> list[dict[str, str]]:
 
     fallback_fns = [
         parse_anamallais_part_above_si,
+        parse_tally_phone_goods_line,
         parse_sno_part_particulars_gst,
         parse_desc_part_brand_hsn,
         parse_sno_part_desc_discounts,
