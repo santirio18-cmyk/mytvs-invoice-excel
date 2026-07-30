@@ -290,6 +290,94 @@ def test_qa_pdf_pack_if_present():
         assert not str(out.get("supplier_name", "")).startswith("(")
 
 
+def test_karthick_einvoice_part_desc_split():
+    """PartNo must not swallow description words (3015 / Optech layout)."""
+    from main import _split_einvoice_part_desc, parse_einvoice_line_items
+    from extraction.layout import detect_table_layout
+
+    assert _split_einvoice_part_desc("06342490104 PSF PLUS TFA PUMP") == (
+        "06342490104",
+        "PSF PLUS TFA PUMP",
+    )
+    assert _split_einvoice_part_desc("1411302/4 LEY SYN CONE 45T") == (
+        "1411302/4",
+        "LEY SYN CONE 45T",
+    )
+    assert _split_einvoice_part_desc("03326218584 L/T BRUSH SET") == (
+        "03326218584",
+        "L/T BRUSH SET",
+    )
+    assert _split_einvoice_part_desc("4MM PVC SLEEVE 4MM PVC") == (
+        "4MM PVC SLEEVE",
+        "4MM PVC",
+    )
+    assert _split_einvoice_part_desc("3 INCH ALLU PIPE ALLU CLAMP PIPE 3\"")[0] == (
+        "3 INCH ALLU PIPE"
+    )
+    assert _split_einvoice_part_desc("U TRUCK WIPER BLA U TRUCK WIPER BLADE") == (
+        "U TRUCK WIPER BLA",
+        "U TRUCK WIPER BLADE",
+    )
+    assert _split_einvoice_part_desc("042 SIR501 ENGINE MOUNTING AL") == (
+        "042 SIR501",
+        "ENGINE MOUNTING AL",
+    )
+
+    twin = """
+    E-Invoice
+    SRI SAMPLE AGENCY
+    Bill No : 9999
+    S.No PartNo Description Qty Rate
+    HSN Tax Total
+    Code % Amount
+    1 06342490104 PSF PLUS TFA PUMP 84138120 1 SETS 8327.11 18 9825.99
+    2 1411302/4 LEY SYN CONE 45T 87089900 1 NOS- 1080.51 18 1275.01
+    3 4MM PVC SLEEVE 4MM PVC 39173990 1 NOS- 55.08 18 65.00
+    """
+    assert detect_table_layout(twin) == "einvoice"
+    items = parse_einvoice_line_items(twin)
+    by_part = {it["part_number"]: it["description"] for it in items}
+    assert by_part["06342490104"] == "PSF PLUS TFA PUMP"
+    assert by_part["1411302/4"] == "LEY SYN CONE 45T"
+    assert by_part["4MM PVC SLEEVE"] == "4MM PVC"
+
+
+def test_thangam_279_if_present():
+    pdf = Path(__file__).resolve().parents[2] / "samples/279.pdf"
+    if not pdf.exists():
+        return
+    out = extract_invoice(pdf.read_bytes(), "279.pdf")
+    items = out.get("line_items") or []
+    assert len(items) >= 20, f"279.pdf: only {len(items)} lines"
+    assert "279" in str(out.get("invoice_number") or "")
+    assert "THANGAM" in str(out.get("supplier_name") or "").upper()
+
+
+def test_karthick_3015_if_present():
+    pdf = Path(__file__).resolve().parents[2] / "samples/3015.pdf"
+    if not pdf.exists():
+        return
+    out = extract_invoice(pdf.read_bytes(), "3015.pdf")
+    items = out.get("line_items") or []
+    assert len(items) >= 35
+    # SKU alone in Part Number — description words must not ride along
+    bad = [
+        it
+        for it in items
+        if "PSF PLUS" in (it.get("part_number") or "")
+        or "BRUSH SET" in (it.get("part_number") or "")
+        or "LEY SYN" in (it.get("part_number") or "")
+    ]
+    assert not bad, bad
+    parts = {it.get("part_number") for it in items}
+    assert "06342490104" in parts
+    assert "1411302/4" in parts
+    assert "03326218584" in parts
+    # Description holds the goods text
+    pump = next(it for it in items if it.get("part_number") == "06342490104")
+    assert "PUMP" in (pump.get("description") or "").upper()
+
+
 def test_no_mid_pattern_global_flags():
     """Python 3.11+ rejects (?i) after | — this crashed 279 (1).pdf on Railway."""
     import re
@@ -311,17 +399,6 @@ def test_no_mid_pattern_global_flags():
         r"Rs\.?\s*([\d,]+\.\d{2})\s*(?:E\s*&?\s*O\s*E|Amount Chargeable)"
     )
     re.compile(pat, re.M)
-
-
-def test_thangam_279_if_present():
-    pdf = Path(__file__).resolve().parents[2] / "samples/279.pdf"
-    if not pdf.exists():
-        return
-    out = extract_invoice(pdf.read_bytes(), "279.pdf")
-    items = out.get("line_items") or []
-    assert len(items) >= 20, f"279.pdf: only {len(items)} lines"
-    assert "279" in str(out.get("invoice_number") or "")
-    assert "THANGAM" in str(out.get("supplier_name") or "").upper()
 
 
 def test_web_style_twins_if_present():

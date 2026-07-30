@@ -99,6 +99,18 @@ def strip_part_from_description(it: dict[str, str]) -> dict[str, str]:
                     desc = m.group(2).strip()
                     it["part_number"] = part
                     it["description"] = desc
+                else:
+                    # Long alphanumeric SKU at start of description (Optech bleed)
+                    m = re.match(
+                        r"^(\d{5,}[A-Z0-9]*|[A-Z]{1,6}\d{2,}[A-Z0-9\/\-]*)\s+(.+)$",
+                        desc,
+                        re.I,
+                    )
+                    if m:
+                        part = m.group(1)
+                        desc = m.group(2).strip()
+                        it["part_number"] = part
+                        it["description"] = desc
 
     if not part or not desc:
         return it

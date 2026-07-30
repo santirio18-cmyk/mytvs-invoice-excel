@@ -80,6 +80,11 @@ def detect_table_layout(text: str) -> LayoutSchema:
     if has_mrp and has_rate:
         return "mrp_rate"
 
+    # Optech / Karthick digital e-invoice: S.No PartNo Description ...
+    # (header may wrap "Tax %" across lines — don't require tax% on one line)
+    if has_sno and has_part and has_hsn and re.search(r"(?i)\bdescription\b", hdr) and not has_mrp:
+        return "einvoice"
+
     # Counter credit bill: Part HSN Rate Qty (no MRP column)
     if has_credit and not has_mrp:
         return "credit_rate_qty"

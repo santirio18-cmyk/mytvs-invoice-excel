@@ -36,7 +36,7 @@ CORS_ORIGINS = [o.strip() for o in _cors.split(",") if o.strip()] or ["*"]
 
 app = FastAPI(title="myTVS — Invoice to Excel", version="2.0.0")
 
-DEPLOY_MARK = "2026-07-30-re-flags-279"
+DEPLOY_MARK = "2026-07-30-karthick-part"
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -769,6 +769,9 @@ def _normalize_part_fields(it: dict[str, str]) -> dict[str, str]:
         return it
     if looks_like_part_number(part):
         return it
+    # Keep multi-word PartNo column values (Optech: "U TRUCK WIPER BLA", "3 INCH ALLU PIPE")
+    if " " in part and 8 <= len(part) <= 48:
+        return it
     desc = str(it.get("description") or "").strip()
     it["part_number"] = ""
     it["description"] = _clean(f"{part} {desc}".strip()) if desc else part
@@ -1487,6 +1490,71 @@ def _repair_qty_mrp_shift(
     return repair_qty_mrp_shift(items, text, schema=schema)
 
 
+def _is_einvoice_sku_token(tok: str) -> bool:
+    """Single-token PartNo (not size words like 4MM / 3)."""
+    t = (tok or "").strip()
+    if len(t) < 3:
+        return False
+    if re.fullmatch(r"(?i)\d+MM", t):
+        return False
+    # Letter+digit mix: B2K01702, 18X15/32, S-3874W, 110R61102
+    if re.search(r"[A-Za-z]", t) and re.search(r"\d", t):
+        return True
+    # Long numeric SKUs: 06342490104
+    if re.fullmatch(r"\d{5,}", t):
+        return True
+    # Digit + slash/dash codes: 1411302/4
+    if re.search(r"\d", t) and re.search(r"[/\\-]", t) and len(t) >= 5:
+        return True
+    return False
+
+
+def _split_einvoice_part_desc(head: str) -> tuple[str, str]:
+    """
+    Split Optech/Karthick 'PartNo + Description' blob into fields.
+
+    Never swallow description words into PartNo for real SKUs
+    (bug: '06342490104 PSF PLUS TFA' / 'PUMP').
+    """
+    tokens = [t for t in (head or "").split() if t]
+    if not tokens:
+        return "", ""
+
+    # Truncated PartNo that repeats into Description:
+    #   U TRUCK WIPER BLA U TRUCK WIPER BLADE
+    #   KALYANI SHOE SPRI KALYANI SHOE SPRING
+    #   4MM PVC SLEEVE 4MM PVC
+    for n in range(2, min(6, len(tokens))):
+        right = tokens[n:]
+        if len(right) < 2:
+            continue
+        if tokens[0].upper() == right[0].upper() and tokens[1].upper() == right[1].upper():
+            return " ".join(tokens[:n]), " ".join(right)
+
+    t0 = tokens[0]
+    if _is_einvoice_sku_token(t0):
+        return t0, " ".join(tokens[1:])
+
+    # Short prefix + SKU: 042 SIR501 ENGINE MOUNTING AL
+    if re.fullmatch(r"\d{1,4}", t0) and len(tokens) >= 2 and _is_einvoice_sku_token(tokens[1]):
+        return f"{t0} {tokens[1]}", " ".join(tokens[2:])
+
+    # Size / material PartNo: 3 INCH ALLU PIPE ALLU CLAMP PIPE 3"
+    if re.fullmatch(r"\d{1,3}", t0) or re.fullmatch(r"(?i)\d*MM", t0):
+        take = min(4, len(tokens))
+        for n in range(2, take + 1):
+            if n < len(tokens) and tokens[n].upper() in {t.upper() for t in tokens[1:n]}:
+                take = n
+                break
+        return " ".join(tokens[:take]), " ".join(tokens[take:])
+
+    # Alpha-only PartNo column (rare): keep first chunk if rest looks like words
+    if re.search(r"[A-Za-z]", t0) and len(t0) >= 5 and re.search(r"\d", " ".join(tokens[1:2] or [""])):
+        return t0, " ".join(tokens[1:])
+
+    return "", head
+
+
 def parse_einvoice_line_items(text: str) -> list[dict[str, str]]:
     """
     Digital e-invoice layout (e.g. SRI KARTHICK AGENCY):
@@ -1512,32 +1580,14 @@ def parse_einvoice_line_items(text: str) -> list[dict[str, str]]:
         m = row.match(ln)
         if not m:
             continue
-        head = _clean(m.group("head"))
-        tokens = head.split()
-        part, desc = "", head
-        if tokens:
-            t0 = tokens[0]
-            # Single-token part codes are most common on these e-invoices
-            if re.search(r"[A-Za-z]", t0) and (re.search(r"\d", t0) or len(t0) >= 5):
-                part = t0
-                desc = " ".join(tokens[1:]) if len(tokens) > 1 else t0
-            elif re.match(r"^\d", t0) and len(tokens) >= 2:
-                # e.g. "3 INCH ALLU PIPE ALLU CLAMP..."
-                take = 1
-                for tok in tokens[1:4]:
-                    if tok.isupper() or re.search(r"\d", tok):
-                        take += 1
-                    else:
-                        break
-                part = " ".join(tokens[:take])
-                desc = " ".join(tokens[take:]) or part
-            else:
-                desc = head
+        part, desc = _split_einvoice_part_desc(_clean(m.group("head")))
+        if not part and not desc:
+            continue
         unit = (m.group("unit") or "").rstrip("-")
         items.append(
             {
                 "part_number": part,
-                "description": desc,
+                "description": desc or part,
                 "hsn_sac": m.group("hsn"),
                 "qty": f"{m.group('qty')} {unit}".strip(),
                 "rate": m.group("rate"),
@@ -3121,6 +3171,7 @@ def parse_line_items(text: str) -> list[dict[str, str]]:
             parse_part_hsn_qty_rate,
         ],
         "credit_rate_qty": [
+            parse_einvoice_line_items,
             parse_item_rate_unit_rate_tax,
             parse_impal_item_bin_line,
             parse_sno_part_particulars_gst,
@@ -3135,6 +3186,7 @@ def parse_line_items(text: str) -> list[dict[str, str]]:
             parse_amount_trail_items,
         ],
         "einvoice": [
+            parse_einvoice_line_items,
             parse_item_rate_unit_rate_tax,
             parse_impal_item_bin_line,
             parse_sno_part_particulars_gst,
@@ -3143,11 +3195,11 @@ def parse_line_items(text: str) -> list[dict[str, str]]:
             parse_anbu_part_hsn_net,
             parse_sno_part_desc_discounts,
             parse_goods_hsn_qty_rate_disc,
-            parse_einvoice_line_items,
             parse_part_hsn_qty_rate,
             lambda t: parse_tally_scan_items(t, hsn_digits=8),
         ],
         "unknown": [
+            parse_einvoice_line_items,
             parse_item_rate_unit_rate_tax,
             parse_impal_item_bin_line,
             parse_anamallais_part_above_si,
@@ -3160,6 +3212,7 @@ def parse_line_items(text: str) -> list[dict[str, str]]:
     }
 
     fallback_fns = [
+        parse_einvoice_line_items,
         parse_item_rate_unit_rate_tax,
         parse_impal_item_bin_line,
         parse_anamallais_part_above_si,
@@ -3173,7 +3226,6 @@ def parse_line_items(text: str) -> list[dict[str, str]]:
         parse_item_code_particulars,
         parse_part_mrp_disc_tax_amount,
         parse_s_code_nos_items,
-        parse_einvoice_line_items,
         parse_mrp_rate_items,
         parse_part_hsn_qty_rate,
         parse_handwritten_rate_qty_amount,
