@@ -106,18 +106,44 @@ def strip_part_from_description(it: dict[str, str]) -> dict[str, str]:
     return it
 
 
-def repair_qty_mrp_shift(items: list[dict[str, str]], text: str = "") -> list[dict[str, str]]:
+def _tidy_qty_only(items: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Integer-ize whole qtys; clear fake MRP==Rate copies. No inventing MRP."""
+    fixed: list[dict[str, str]] = []
+    for raw in items:
+        it = dict(raw)
+        qty_s = str(it.get("qty") or "").strip()
+        qty_tok = qty_s.split()[0].replace(",", "") if qty_s else ""
+        qty_v = _fnum(qty_tok)
+        rate_v = _fnum(it.get("rate"))
+        mrp_v = _fnum(it.get("mrp"))
+        if qty_v is not None and qty_v == int(qty_v):
+            unit = " ".join(qty_s.split()[1:]) if qty_s.split()[1:] else ""
+            it["qty"] = f"{int(qty_v)} {unit}".strip()
+        if mrp_v is not None and rate_v is not None and abs(mrp_v - rate_v) < 0.01:
+            it["mrp"] = ""
+        fixed.append(it)
+    return fixed
+
+
+def repair_qty_mrp_shift(
+    items: list[dict[str, str]],
+    text: str = "",
+    schema: str | None = None,
+) -> list[dict[str, str]]:
     """
     Stop MRP / discount landing in Qty (Ashok Qty→MRP→Dis%→Tax%→Amount layouts).
 
-    Typical failures:
-      qty=364.00 (actually MRP), rate empty/wrong
-      qty=292 Nos (truncated MRP), rate≈0
-      qty=30.00 (Dis%), rate=364.00 (actually MRP)
-
-    Must NOT touch balanced CREDIT BILL / Padmavathi rows where Qty×Rate≈Amount
-    (those put Rate into MRP and invent a fake discount).
+    Schema-gated (layout-first):
+      - credit_rate_qty / item_code / einvoice → tidy only, never invent MRP
+      - mrp_disc / mrp_rate → full repair
+      - unknown → repair only if header has MRP or Dis%
     """
+    from extraction.layout import detect_table_layout, schema_allows_mrp_repair
+
+    resolved = schema or detect_table_layout(text or "")
+    if not schema_allows_mrp_repair(resolved, text or ""):  # type: ignore[arg-type]
+        return _tidy_qty_only(items)
+
     has_mrp_hdr = bool(re.search(r"(?i)\bmrp\b", (text or "")[:2000]))
     fixed: list[dict[str, str]] = []
     for raw in items:
@@ -145,7 +171,6 @@ def repair_qty_mrp_shift(items: list[dict[str, str]], text: str = "") -> list[di
             return False
 
         # Already a clean Qty × Rate ≈ Amount line — do not invent MRP/discount
-        # (Sri Padmavathi / SPAC credit bills: Qty 3.00 · Rate 247.00 · Amount 741.00)
         line_balanced = (
             qty_v is not None
             and rate_v is not None
@@ -154,7 +179,6 @@ def repair_qty_mrp_shift(items: list[dict[str, str]], text: str = "") -> list[di
             and abs(qty_v * rate_v - amt_v) <= max(0.51, 0.02 * amt_v)
         )
         if line_balanced and (not mrp_v or abs((mrp_v or 0) - rate_v) < 0.01):
-            # Keep integer qty when whole; clear fake MRP==Rate copy
             if qty_v == int(qty_v):
                 unit = " ".join(qty_s.split()[1:]) if qty_s.split()[1:] else ""
                 it["qty"] = f"{int(qty_v)} {unit}".strip()
@@ -163,8 +187,7 @@ def repair_qty_mrp_shift(items: list[dict[str, str]], text: str = "") -> list[di
             fixed.append(it)
             continue
 
-        # C first: Dis% in Qty, MRP in Rate (xx.00 ≤100 is discount, not MRP)
-        # Only when Qty×Rate does NOT already explain Amount.
+        # C: Dis% in Qty, MRP in Rate
         if (
             not mrp_v
             and qty_v is not None
@@ -185,7 +208,7 @@ def repair_qty_mrp_shift(items: list[dict[str, str]], text: str = "") -> list[di
                 it["qty"] = ""
                 it["rate"] = ""
 
-        # A) Qty looks like money → it is MRP (auto-part MRPs usually ≥100)
+        # A) Qty looks like money → it is MRP
         elif qty_tok and re.fullmatch(r"\d+\.\d{2}", qty_tok) and qty_v is not None and qty_v >= 100:
             if not mrp_v:
                 it["mrp"] = qty_tok
@@ -199,7 +222,7 @@ def repair_qty_mrp_shift(items: list[dict[str, str]], text: str = "") -> list[di
                 if net > 0 and _derive_qty_from_amount(net):
                     it["rate"] = f"{net:.2f}"
 
-        # B) Qty is truncated MRP (292 Nos from 2920.00) under an MRP header
+        # B) Qty is truncated MRP under an MRP header
         elif (
             has_mrp_hdr
             and qty_v is not None
@@ -212,7 +235,7 @@ def repair_qty_mrp_shift(items: list[dict[str, str]], text: str = "") -> list[di
             if rate_v and rate_v > 0 and _derive_qty_from_amount(rate_v):
                 pass
 
-        # D) Rate was copied from MRP — keep MRP in mrp, put net unit in rate
+        # D) Rate was copied from MRP
         mrp_v = _fnum(it.get("mrp"))
         rate_v = _fnum(it.get("rate"))
         qty_v = _fnum(str(it.get("qty") or "").split()[0] if it.get("qty") else None)

@@ -36,7 +36,7 @@ CORS_ORIGINS = [o.strip() for o in _cors.split(",") if o.strip()] or ["*"]
 
 app = FastAPI(title="myTVS — Invoice to Excel", version="2.0.0")
 
-DEPLOY_MARK = "2026-07-30-padmavathi-mrp"
+DEPLOY_MARK = "2026-07-30-layout-schema"
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -1275,10 +1275,14 @@ def _fnum(val: str | None) -> float | None:
         return None
 
 
-def _repair_qty_mrp_shift(items: list[dict[str, str]], text: str = "") -> list[dict[str, str]]:
+def _repair_qty_mrp_shift(
+    items: list[dict[str, str]],
+    text: str = "",
+    schema: str | None = None,
+) -> list[dict[str, str]]:
     from extraction.validate import repair_qty_mrp_shift
 
-    return repair_qty_mrp_shift(items, text)
+    return repair_qty_mrp_shift(items, text, schema=schema)
 
 
 def parse_einvoice_line_items(text: str) -> list[dict[str, str]]:
@@ -1341,8 +1345,11 @@ def parse_einvoice_line_items(text: str) -> list[dict[str, str]]:
     return _dedupe_items(items)
 
 
-def _item_score(items: list[dict[str, str]]) -> int:
-    """Prefer complete rows (desc/part + qty + rate/mrp + amount)."""
+def _item_score(items: list[dict[str, str]], schema: str | None = None) -> int:
+    """Prefer complete rows; score MRP only when the layout expects it."""
+    from extraction.layout import schema_expects_mrp
+
+    expects_mrp = schema_expects_mrp(schema) if schema else None  # type: ignore[arg-type]
     score = 0
     for it in items:
         if not (it.get("description") or it.get("part_number")):
@@ -1358,7 +1365,12 @@ def _item_score(items: list[dict[str, str]]) -> int:
         if it.get("rate"):
             score += 1
         if it.get("mrp"):
-            score += 2
+            if expects_mrp is True:
+                score += 2
+            elif expects_mrp is False:
+                score -= 1  # invented MRP on non-MRP layouts
+            else:
+                score += 1  # unknown: mild reward only
         if it.get("amount"):
             score += 2
         if it.get("part_number"):
@@ -1782,27 +1794,72 @@ def parse_item_code_particulars(text: str) -> list[dict[str, str]]:
 
 def parse_line_items(text: str) -> list[dict[str, str]]:
     """
-    Try multiple generic strategies and keep the best result.
-    Not tied to any one supplier — covers digital e-invoices, Tally scans, and photos.
+    Layout-first: detect column schema, prefer matching parsers, gate MRP repair.
+    Not tied to vendor names — same headers work for any supplier.
     """
-    candidates = [
-        parse_item_code_particulars(text),
-        parse_part_mrp_disc_tax_amount(text),
-        parse_s_code_nos_items(text),
-        parse_einvoice_line_items(text),
-        parse_mrp_rate_items(text),
-        parse_part_hsn_qty_rate(text),
-        parse_handwritten_rate_qty_amount(text),
-        parse_credit_bill_hsn_rate_qty(text),
-        parse_photo_gstr_qty_rate(text),
-        parse_tally_scan_items(text, hsn_digits=8),
-        parse_tally_scan_items(text, hsn_digits=4),
-        parse_part_column_items(text),
-        parse_amount_trail_items(text),
+    from extraction.layout import detect_table_layout
+
+    schema = detect_table_layout(text)
+
+    preferred_fns: dict[str, list] = {
+        "mrp_disc": [
+            parse_part_mrp_disc_tax_amount,
+            parse_mrp_rate_items,
+            parse_part_hsn_qty_rate,
+        ],
+        "mrp_rate": [
+            parse_mrp_rate_items,
+            parse_part_mrp_disc_tax_amount,
+            parse_part_hsn_qty_rate,
+        ],
+        "credit_rate_qty": [
+            parse_credit_bill_hsn_rate_qty,
+            parse_part_hsn_qty_rate,
+            parse_part_column_items,
+        ],
+        "item_code": [
+            parse_item_code_particulars,
+            lambda t: parse_tally_scan_items(t, hsn_digits=8),
+            parse_amount_trail_items,
+        ],
+        "einvoice": [
+            parse_einvoice_line_items,
+            parse_part_hsn_qty_rate,
+            lambda t: parse_tally_scan_items(t, hsn_digits=8),
+        ],
+        "unknown": [],
+    }
+
+    fallback_fns = [
+        parse_item_code_particulars,
+        parse_part_mrp_disc_tax_amount,
+        parse_s_code_nos_items,
+        parse_einvoice_line_items,
+        parse_mrp_rate_items,
+        parse_part_hsn_qty_rate,
+        parse_handwritten_rate_qty_amount,
+        parse_credit_bill_hsn_rate_qty,
+        parse_photo_gstr_qty_rate,
+        lambda t: parse_tally_scan_items(t, hsn_digits=8),
+        lambda t: parse_tally_scan_items(t, hsn_digits=4),
+        parse_part_column_items,
+        parse_amount_trail_items,
     ]
 
+    ordered_fns: list = []
+    seen_names: set[str] = set()
+    for i, fn in enumerate((preferred_fns.get(schema) or []) + fallback_fns):
+        key = getattr(fn, "__name__", "") or f"fn{i}"
+        if key == "<lambda>":
+            key = f"lambda:{i}"
+        if key in seen_names:
+            continue
+        seen_names.add(key)
+        ordered_fns.append(fn)
+
+    candidates = [fn(text) for fn in ordered_fns]
+
     def _quality(items: list[dict[str, str]]) -> tuple:
-        # Prefer rows with real descriptions / part numbers; penalize OCR junk
         usable = []
         for it in items:
             desc = re.sub(r"[^A-Za-z]", "", str(it.get("description") or ""))
@@ -1815,7 +1872,6 @@ def parse_line_items(text: str) -> list[dict[str, str]]:
                 rate_v = 0
             if rate_v <= 0 and not it.get("mrp"):
                 continue
-            # Qty accidentally set to MRP (e.g. "2520 Nos") with tiny rate
             qty_tok = str(it.get("qty") or "").split()[0].replace(",", "")
             try:
                 qty_v = float(qty_tok)
@@ -1823,14 +1879,12 @@ def parse_line_items(text: str) -> list[dict[str, str]]:
                 qty_v = 0
             if qty_v >= 100 and rate_v < 1:
                 continue
-            # MRP/money must not sit in Qty
             if re.fullmatch(r"\d+\.\d{2}", qty_tok) and qty_v >= 20:
                 continue
             usable.append(it)
-        return (_item_score(usable), len(usable), _item_score(items))
+        return (_item_score(usable, schema), len(usable), _item_score(items, schema))
 
     best = max(candidates, key=_quality)
-    # Drop junk rows from the winning set
     cleaned = []
     for it in best:
         desc = re.sub(r"[^A-Za-z]", "", str(it.get("description") or ""))
@@ -1850,14 +1904,12 @@ def parse_line_items(text: str) -> list[dict[str, str]]:
             qty_v = 0
         if qty_v >= 100 and rate_v < 1:
             continue
-        if re.fullmatch(r"\d+\.\d{2}", qty_tok) and qty_v >= 100:
-            # Still keep the row — repair step will move value to MRP
-            pass
         cleaned.append(it)
-    if _item_score(cleaned) > 0:
+    if _item_score(cleaned, schema) > 0:
         return _repair_qty_mrp_shift(
             [_strip_part_from_description(it) for it in _normalize_shifted_hsn(cleaned)],
             text,
+            schema=schema,
         )
     return []
 
