@@ -36,7 +36,7 @@ CORS_ORIGINS = [o.strip() for o in _cors.split(",") if o.strip()] or ["*"]
 
 app = FastAPI(title="myTVS — Invoice to Excel", version="2.0.0")
 
-DEPLOY_MARK = "2026-07-30-karthick-part"
+DEPLOY_MARK = "2026-07-30-thangam-date"
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -396,11 +396,25 @@ def find_date(text: str) -> str:
         r"|\d{1,2}[\-\/\.]\d{1,2}[\-\/\.]\d{2,4})",
         # Handwritten: Date 16.07.2026 / 16. 07. 2026
         r"(?:Date|Pate)\s*[:\-|=]?\s*(\d{1,2}\s*[\.]\s*\d{1,2}\s*[\.]\s*\d{2,4})",
+        # Tally header: "Invoice No. Dated" with 29-Jun-26 beside / under the number
+        r"(?i)Dated\s*[^\n]{0,80}?(\d{1,2}-(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)-\d{2,4})",
     ):
         labeled = re.search(pat, text, re.I)
         if labeled:
             return re.sub(r"\s+", "", _clean(labeled.group(1)))
-    top = "\n".join(text.splitlines()[:50])
+
+    top = "\n".join(text.splitlines()[:60])
+
+    # Prefer clear dd-Mon-yy (Tally) before inventing from invoice numbers / OCR noise
+    for blob in (top, text):
+        m = re.search(
+            r"\b(\d{1,2}-(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)-\d{2,4})\b",
+            blob,
+            re.I,
+        )
+        if m:
+            return _clean(m.group(1)).replace(" ", "")
+
     # Prefer Indian dd.mm.yyyy / dd-mm-yyyy over US m/d/yyyy email stamps.
     # Skip dates that only appear inside zip/file names (Testing 28.7.2026.zip).
     def _ok_date(val: str, blob: str) -> bool:
@@ -421,11 +435,16 @@ def find_date(text: str) -> str:
         if m and _ok_date(m.group(1), blob):
             return m.group(1)
     # Labeled but OCR-noisy: Date i6.0 / Pate 16.0%, 2024 (= 16.07.2026)
+    # Never invent a date from invoice numbers like 279/2026-27 → 27.9.2026
     noisy = re.search(
         r"(?i)(?:invoice|inv[a-z]*\s*no|date|pate)\D{0,24}"
         r"(\d{1,2})\D{0,3}(?:(0\s*[%7])|(\d{1,2}))\D{0,3}(20\d{2})",
         text,
     )
+    if noisy:
+        raw = noisy.group(0)
+        if "/" in raw or re.search(r"(?i)invoice\s*no", raw):
+            noisy = None
     if noisy:
         d = int(noisy.group(1))
         if noisy.group(2):

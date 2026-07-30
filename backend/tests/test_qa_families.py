@@ -342,6 +342,27 @@ def test_karthick_einvoice_part_desc_split():
     assert by_part["4MM PVC SLEEVE"] == "4MM PVC"
 
 
+def test_thangam_date_not_from_invoice_no():
+    """279/2026-27 must not become date 27.9.2026."""
+    from main import find_date
+
+    blob = """
+    THANGAM MOTORS Invoice No. Dated
+    Plot, No.18, Chitra Plaza 279/2026-27 29-Jun-26
+    State Name: Tamil Nadu, Code : 33
+    """
+    assert find_date(blob) == "29-Jun-26"
+    # OCR form that used to invent 27.9.2026
+    noisy = """
+    (ORIGINAL FOR RECIPIENT)
+
+    Invoice No. Dated
+    279/2026-27. 29-Jun-26
+    Reference No. & Date.
+    """
+    assert find_date(noisy) == "29-Jun-26"
+
+
 def test_thangam_279_if_present():
     pdf = Path(__file__).resolve().parents[2] / "samples/279.pdf"
     if not pdf.exists():
@@ -351,6 +372,7 @@ def test_thangam_279_if_present():
     assert len(items) >= 20, f"279.pdf: only {len(items)} lines"
     assert "279" in str(out.get("invoice_number") or "")
     assert "THANGAM" in str(out.get("supplier_name") or "").upper()
+    assert out.get("date") == "29-Jun-26", out.get("date")
 
 
 def test_karthick_3015_if_present():
