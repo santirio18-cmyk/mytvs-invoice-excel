@@ -2524,9 +2524,30 @@ def parse_tally_phone_goods_line(text: str) -> list[dict[str, str]]:
         if not prev or v > prev[0]:
             taxable_by_hsn[hsn] = (v, raw)
 
+    # Anchor taxable to Grand Total / 1.18 when present (phone OCR invents 100.65 / 300.50)
+    grand = None
+    gm = re.search(
+        r"(?i)(?:Total|Rs\.?)\s*[^\n]{0,12}?(?:Rs\.?\s*)?([\d,]+\.\d{2})\s*$|"
+        r"(?i)Rs\.?\s*([\d,]+\.\d{2})\s*(?:E\s*&?\s*O\s*E|Amount Chargeable)",
+        text,
+        re.M,
+    )
+    # Stronger: "2Nos Rs. 471.00" / "Total) 2Nos Rs. 471.00"
+    gm2 = re.search(r"(?i)\bNos\b[^\n]{0,12}?Rs\.?\s*([\d,]+\.\d{2})", text)
+    for g in (gm2, gm):
+        if not g:
+            continue
+        try:
+            raw = next(x for x in g.groups() if x)
+            grand = float(raw.replace(",", ""))
+            if 100 <= grand <= 500000:
+                break
+            grand = None
+        except Exception:
+            grand = None
+
     def _best_amount(hsn: str) -> tuple[str, str]:
         """Return (hsn, amount) preferring summary taxable over mangled line OCR."""
-        # Prefer canonical HSN forms that appear cleanly in OCR (40103999 over 40103000)
         votes: dict[str, int] = {}
         for m in re.finditer(r"\b(40103\d{3}|87\d{6}|84\d{6}|73\d{6}|90\d{6})\b", text):
             votes[m.group(1)] = votes.get(m.group(1), 0) + 1
@@ -2535,21 +2556,26 @@ def parse_tally_phone_goods_line(text: str) -> list[dict[str, str]]:
         if family_hsns:
             preferred_hsn = max(family_hsns, key=lambda h: (votes[h], h.endswith("999"), h))
 
+        candidates = []
+        for h, (v, raw) in taxable_by_hsn.items():
+            if h[:5] == hsn[:5] or h[:4] == hsn[:4] or h == preferred_hsn:
+                candidates.append((h, v, raw))
+        if not candidates:
+            candidates = [(h, v, raw) for h, (v, raw) in taxable_by_hsn.items()]
+        if grand and candidates:
+            target = grand / 1.18  # approx taxable before 18% GST
+            h, v, raw = min(candidates, key=lambda t: abs(t[1] - target))
+            # If nothing is close, synthesize from grand
+            if abs(v - target) > max(25.0, 0.08 * target):
+                return preferred_hsn, f"{target:.2f}"
+            return preferred_hsn or h, f"{v:.2f}"
         if preferred_hsn in taxable_by_hsn and taxable_by_hsn[preferred_hsn][0] >= 150:
-            return preferred_hsn, taxable_by_hsn[preferred_hsn][1]
-        if hsn in taxable_by_hsn and taxable_by_hsn[hsn][0] >= 150:
-            return preferred_hsn if preferred_hsn else hsn, taxable_by_hsn[hsn][1]
-        family = [
-            (h, v, raw)
-            for h, (v, raw) in taxable_by_hsn.items()
-            if h[:5] == hsn[:5] or h[:4] == hsn[:4]
-        ]
-        if family:
-            h, v, raw = max(family, key=lambda t: t[1])
-            return preferred_hsn or h, raw
-        if taxable_by_hsn:
-            h, (v, raw) = max(taxable_by_hsn.items(), key=lambda kv: kv[1][0])
-            return preferred_hsn or h, raw
+            return preferred_hsn, f"{taxable_by_hsn[preferred_hsn][0]:.2f}"
+        if candidates:
+            h, v, raw = max(candidates, key=lambda t: t[1])
+            return preferred_hsn or h, f"{v:.2f}"
+        if grand:
+            return preferred_hsn or hsn, f"{(grand / 1.18):.2f}"
         return preferred_hsn or hsn, ""
 
     # Qty near grand total: "2Nos Rs. 471.00"
