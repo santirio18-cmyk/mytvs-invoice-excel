@@ -36,7 +36,7 @@ CORS_ORIGINS = [o.strip() for o in _cors.split(",") if o.strip()] or ["*"]
 
 app = FastAPI(title="myTVS — Invoice to Excel", version="2.0.0")
 
-DEPLOY_MARK = "2026-07-30-foolproof"
+DEPLOY_MARK = "2026-07-30-scan1"
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -1987,10 +1987,14 @@ def parse_desc_part_brand_hsn(text: str) -> list[dict[str, str]]:
       1 HAND BR HOSE ... LEYLAND 91514YA ADEENA 39172390 1 NOS 249.70 18 249.70
       9 LEYLAND U TRUCK FAN BELT 8PK-1552CONTITECH 40103390 1 NOS 598.90 18 598.90
       33 COURIER CHARGES 996812 1 750.00 18 750.00
+
+    Also recovers OCR-noisy scan lines (TRANSPORT COPY):
+      1 V ROD ASSY U TRUCK B6Y03007 LEYLAND ... PRIZOL 73269099 = {ANOS 10935.00 18 10,935.00
     """
-    if not re.search(r"(?i)PART\s*NO|PARTNO", text[:2500]):
+    if not re.search(r"(?i)PART\s*NO|PARTNO|KARPAGAM|DESCRIPTION\s+OF\s+GOODS", text[:3500]):
         return []
     items: list[dict[str, str]] = []
+    seen_sl: set[int] = set()
     # Brand optional — OCR often glues brand onto part (CONTITECH, STAR)
     # Unit required so courier/SAC lines don't steal CHARGES as part no.
     row = re.compile(
@@ -2017,12 +2021,30 @@ def parse_desc_part_brand_hsn(text: str) -> list[dict[str, str]]:
         r"(?P<amount>[\d,]+\.\d{2})\s*$",
         re.I,
     )
+    # OCR-noisy: SI ... PARTCODE ... HSN8 ... RATE GST AMOUNT (qty often "{ANOS" / "1NOS")
+    fuzzy = re.compile(
+        r"^\s*(?P<sl>\d{1,3})\s+"
+        r"(?P<head>.+?)\s+"
+        r"(?P<hsn>\d{8})\s+"
+        r".*?"
+        r"(?P<rate>[\d,]+\.\d{2})\s+"
+        r"(?P<gst>5|12|18|28)\s+"
+        r"(?P<amount>[\d,]+\.\d{2})\s*$",
+        re.I,
+    )
+
+    def _append(sl: int, item: dict[str, str]) -> None:
+        if sl in seen_sl:
+            return
+        seen_sl.add(sl)
+        items.append(item)
+
     for raw in text.splitlines():
         ln = _clean(raw)
         if not ln or STOP_ITEM.search(ln):
             continue
         # Skip HSN summary rows (description is a commodity class sentence)
-        if re.search(r"(?i)^(?:tubes|other|locks|natural|threaded|postal|scan)\b", ln):
+        if re.search(r"(?i)^(?:tubes|other|locks|natural|threaded|postal|scan|lower|postal)\b", ln):
             continue
         m = row.match(ln)
         if m:
@@ -2033,7 +2055,8 @@ def parse_desc_part_brand_hsn(text: str) -> list[dict[str, str]]:
                     part = part[: -len(brand_s)]
                     break
             unit = (m.group("unit") or "").strip()
-            items.append(
+            _append(
+                int(m.group("sl")),
                 {
                     "part_number": part,
                     "description": _clean(m.group("desc")),
@@ -2042,24 +2065,70 @@ def parse_desc_part_brand_hsn(text: str) -> list[dict[str, str]]:
                     "mrp": "",
                     "rate": m.group("rate"),
                     "amount": m.group("amount"),
-                }
+                },
             )
             continue
         m2 = charge.match(ln)
-        if not m2:
+        if m2 and re.search(r"(?i)courier|freight|packing|transport|labour", m2.group("desc")):
+            _append(
+                int(m2.group("sl")),
+                {
+                    "part_number": "",
+                    "description": _clean(m2.group("desc")),
+                    "hsn_sac": m2.group("hsn"),
+                    "qty": m2.group("qty"),
+                    "mrp": "",
+                    "rate": m2.group("rate"),
+                    "amount": m2.group("amount"),
+                },
+            )
             continue
-        if not re.search(r"(?i)courier|freight|packing|transport|labour", m2.group("desc")):
+        mf = fuzzy.match(ln)
+        if not mf:
             continue
-        items.append(
+        if re.search(r"(?i)courier|freight|packing", ln):
+            continue
+        head = mf.group("head")
+        # Prefer alphanumeric part codes with a digit (B6Y03007, 91514YA)
+        part_cands = re.findall(r"\b([A-Z0-9][A-Z0-9\/\-]{4,})\b", head, re.I)
+        part = ""
+        for cand in part_cands:
+            if looks_like_part_number(cand) and not re.fullmatch(r"\d{8}", cand):
+                part = cand
+                break
+        if not part:
+            continue
+        # Description = tokens before part
+        desc = head
+        idx = desc.upper().find(part.upper())
+        if idx > 0:
+            desc = desc[:idx].strip()
+        qty = "1"
+        qm = re.search(r"(?i)(?:\{|\b)(\d+)\s*A?NOS\b", ln)
+        if qm:
+            qty = qm.group(1)
+        rate = mf.group("rate")
+        amount = mf.group("amount")
+        # Prefer amount that matches rate when qty=1 (OCR often duplicates)
+        try:
+            if abs(float(rate.replace(",", "")) - float(amount.replace(",", ""))) < 0.05:
+                pass
+            elif float(qty) == 1 and float(rate.replace(",", "")) > float(amount.replace(",", "")) * 5:
+                # Amount stolen from courier line — use rate as amount
+                amount = rate
+        except Exception:
+            pass
+        _append(
+            int(mf.group("sl")),
             {
-                "part_number": "",
-                "description": _clean(m2.group("desc")),
-                "hsn_sac": m2.group("hsn"),
-                "qty": m2.group("qty"),
+                "part_number": part,
+                "description": _clean(desc) or part,
+                "hsn_sac": mf.group("hsn"),
+                "qty": f"{qty} NOS",
                 "mrp": "",
-                "rate": m2.group("rate"),
-                "amount": m2.group("amount"),
-            }
+                "rate": rate,
+                "amount": amount,
+            },
         )
     return _dedupe_items(items)
 

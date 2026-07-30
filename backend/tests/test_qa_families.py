@@ -129,6 +129,14 @@ S.No Part No Description HSN Qty MRP Rate Amount
 2 10/12 Wheel BOOT 87087000 500 115.00 57500.00
 """
 
+SCAN1_KARPAGAM_NOISY = """
+KARPAGAM AUTO STORES
+TAX INVOICE TRANSPORT COPY
+S.No DESCRIPTION OF GOODS PARTNO BRAND HSN/SAC QTY U! RATE GST TAXABLE VAL
+1 V ROD ASSY U TRUCK B6Y03007 LEYLAND \\c 19 10057 = PRIZOL 73269099 = {ANOS 10935.00 18 10,935.00
+2 COURIER CHARGES 996812 1 50.00 18 50.00
+"""
+
 CREDIT_TWIN = """
 CREDIT BILL
 Part No Description HSN Rate Qty
@@ -224,6 +232,19 @@ def test_alagu_must_not_invent_wheel_part():
         assert not looks_like_part_number(it.get("part_number") or "") or it.get("part_number") == ""
         assert "Wheel" in (it.get("description") or "") or "BOOT" in (it.get("description") or "")
         assert (it.get("part_number") or "").lower() not in {"wheel", "boot", "minda"}
+
+
+def test_scan1_karpagam_noisy_ocr():
+    items = parse_desc_part_brand_hsn(SCAN1_KARPAGAM_NOISY)
+    assert len(items) == 2
+    assert items[0]["part_number"] == "B6Y03007"
+    assert "V ROD" in items[0]["description"].upper() or "ASSY" in items[0]["description"].upper()
+    assert items[0]["hsn_sac"] == "73269099"
+    assert items[0]["qty"].startswith("1")
+    assert "10935" in items[0]["rate"].replace(",", "")
+    assert "10935" in items[0]["amount"].replace(",", "")
+    assert "COURIER" in items[1]["description"].upper()
+    assert items[1]["amount"] == "50.00"
 
 
 def test_credit_twin_no_mrp():

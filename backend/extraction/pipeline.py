@@ -68,14 +68,35 @@ def _score_items(items: list[dict[str, str]]) -> int:
             score -= 4
             continue
         score += 1
+        qty_tok = str(it.get("qty") or "").split()[0].replace(",", "")
+        try:
+            qty_v = float(qty_tok) if qty_tok else 0.0
+        except Exception:
+            qty_v = 0.0
+        try:
+            rate_v = float(str(it.get("rate") or "0").replace(",", ""))
+        except Exception:
+            rate_v = 0.0
+        try:
+            amt_v = float(str(it.get("amount") or "0").replace(",", ""))
+        except Exception:
+            amt_v = 0.0
+
         if it.get("qty"):
-            score += 1
+            # GST% often lands in Qty on bad bbox (5/12/18/28) with no unit
+            if qty_tok in {"5", "12", "18", "28"} and " " not in str(it.get("qty") or "").strip():
+                score -= 3
+            else:
+                score += 1
         if it.get("rate"):
             score += 1
         if it.get("mrp"):
             score += 1
         if it.get("amount"):
             score += 2
+        # Rate huge but amount tiny → columns scrambled (scan1 failure mode)
+        if rate_v >= 500 and amt_v > 0 and amt_v < rate_v * 0.05 and qty_v <= 28:
+            score -= 6
         if part:
             # Digit-bearing codes are real; short alpha words (Wheel/Minda) are not
             if any(ch.isdigit() for ch in part):
@@ -86,7 +107,11 @@ def _score_items(items: list[dict[str, str]]) -> int:
             else:
                 score += 1
         if it.get("hsn_sac"):
-            score += 1
+            hsn = str(it.get("hsn_sac") or "")
+            if len(hsn) >= 4:
+                score += 1
+            else:
+                score -= 1
     if real_parts:
         score += real_parts * 3
     if junk and not real_parts:
