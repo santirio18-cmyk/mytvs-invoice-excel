@@ -344,17 +344,11 @@ def validate_invoice(inv: dict[str, Any], text: str = "") -> dict[str, Any]:
                 f"(₹{diff:+.2f}). Check missing/extra rows."
             )
             score -= 0.1
-            # Low-res screenshots often invent a few wrong rows — drop them
-            # when the sum is nowhere near the invoice total.
             if taxable >= 500 and item_sum < taxable * 0.25:
                 warnings.append(
-                    "Line items cleared — OCR totals were unreliable. "
-                    "Re-upload a clearer PDF/photo (or enable OpenAI on the server)."
+                    f"Partial extraction: line items sum ₹{item_sum:,.2f} vs invoice total ₹{taxable:,.2f}. "
+                    "Some rows may be missing or cut off. Review before posting."
                 )
-                items = []
-                inv = dict(inv)
-                inv["line_items"] = items
-                item_sum = 0.0
                 score = min(score, 0.4)
 
     missing_amt = sum(1 for it in items if not _money(it.get("amount")))

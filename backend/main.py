@@ -36,7 +36,7 @@ CORS_ORIGINS = [o.strip() for o in _cors.split(",") if o.strip()] or ["*"]
 
 app = FastAPI(title="myTVS — Invoice to Excel", version="2.0.0")
 
-DEPLOY_MARK = "2026-07-30-thangam-date"
+DEPLOY_MARK = "2026-09-29-live"
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -3304,7 +3304,7 @@ def parse_line_items(text: str) -> list[dict[str, str]]:
                 qty_v = float(qty_tok)
             except Exception:
                 qty_v = 0
-            if qty_v >= 100 and rate_v < 1:
+            if qty_v >= 100 and rate_v < 1 and amt_v <= 0:
                 continue
             if re.fullmatch(r"\d+\.\d{2}", qty_tok) and qty_v >= 20:
                 continue
@@ -3338,7 +3338,11 @@ def parse_line_items(text: str) -> list[dict[str, str]]:
             qty_v = float(qty_tok)
         except Exception:
             qty_v = 0
-        if qty_v >= 100 and rate_v < 1:
+        try:
+            amt_v = float(str(it.get("amount") or "0").replace(",", ""))
+        except Exception:
+            amt_v = 0
+        if qty_v >= 100 and rate_v < 1 and amt_v <= 0:
             continue
         cleaned.append(it)
     if _item_score(cleaned, schema) > 0:
